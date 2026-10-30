@@ -1,7 +1,20 @@
 import axios from 'axios';
 
+const resolveBaseUrl = () => {
+  if (import.meta.env.VITE_API_URL) {
+    return import.meta.env.VITE_API_URL;
+  }
+  if (typeof window !== 'undefined') {
+    const host = window.location.hostname;
+    if (host !== 'localhost' && host !== '127.0.0.1') {
+      return 'https://taborapi.ambbatech.com/api';
+    }
+  }
+  return '/api';
+};
+
 const api = axios.create({
-  baseURL: '/api',
+  baseURL: resolveBaseUrl(),
   headers: { 'Content-Type': 'application/json' },
 });
 
