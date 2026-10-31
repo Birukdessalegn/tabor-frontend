@@ -1,4 +1,4 @@
-﻿import { useState, useEffect } from "react";
+import { useState, useEffect } from "react";
 import AmendRoomPriceModal from "../components/AmendRoomPriceModal";
 import {
   CalendarDays,
@@ -111,17 +111,17 @@ export default function ReservationsListPage() {
     loadReservations();
   };
 
-  const today = new Date().toISOString().split("T")[0];
-  const departureAlerts = reservations.filter((r) => getReservationDepartureAlert(r) !== null);
-  const overdueDeparturesCount = departureAlerts.filter((r) => getReservationDepartureAlert(r)?.isOverdue).length;
-
-  const tomorrow = new Date(Date.now() + 86400000).toISOString().split("T")[0];
-
   const [reservations, setReservations] = useState([]);
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState("all");
   const [search, setSearch] = useState("");
   const [toast, setToast] = useState(null);
+
+  const today = new Date().toISOString().split("T")[0];
+  const tomorrow = new Date(Date.now() + 86400000).toISOString().split("T")[0];
+
+  const departureAlerts = (reservations || []).filter((r) => getReservationDepartureAlert(r) !== null);
+  const overdueDeparturesCount = departureAlerts.filter((r) => getReservationDepartureAlert(r)?.isOverdue).length;
 
   // New Reservation Modal state
   const [newResModalOpen, setNewResModalOpen] = useState(false);
