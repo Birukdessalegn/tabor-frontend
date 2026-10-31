@@ -1,0 +1,1837 @@
+﻿import { useState, useEffect } from "react";
+import AmendRoomPriceModal from "../components/AmendRoomPriceModal";
+import {
+  CalendarDays,
+  Search,
+  CheckCircle2,
+  XCircle,
+  X,
+  CreditCard,
+  User,
+  Phone,
+  DoorClosed,
+  CalendarCheck,
+  Ban,
+  Camera,
+  Eye,
+  Check,
+  Loader2,
+  Upload,
+  Plus,
+  BedDouble,
+  Mail,
+  Clock,
+  DollarSign
+} from "lucide-react";
+import {
+  getReservations,
+  checkInReservation,
+  checkOutReservation,
+  addReservationPayment,
+  cancelReservation,
+  updateReservation,
+  uploadGuestIdImage,
+  uploadStandaloneGuestId,
+  createReservation,
+  getRooms,
+  amendReservationPrice,
+} from "../services/frontdeskApi";
+
+const STATUS_COLORS = {
+  confirmed: "bg-amber-50 text-amber-700 border-amber-200",
+  checked_in: "bg-blue-50 text-blue-700 border-blue-200",
+  checked_out: "bg-emerald-50 text-emerald-700 border-emerald-200",
+  cancelled: "bg-rose-50 text-rose-700 border-rose-200",
+  no_show: "bg-slate-100 text-slate-600 border-slate-200",
+};
+
+
+// Helper: 12:00 PM Room Departure Alert for Tabor Hotel
+function getReservationDepartureAlert(r) {
+  if (r.status !== "checked_in" || !r.check_out_date) return null;
+
+  const checkOutRaw = String(r.check_out_date).split("T")[0];
+  const parts = checkOutRaw.split("-").map(Number);
+  if (parts.length !== 3 || parts.some(isNaN)) return null;
+
+  const [y, m, d] = parts;
+  const checkOutDate = new Date(Date.UTC(y, m - 1, d));
+  const now = new Date();
+  const todayUTC = new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()));
+  const diffDays = Math.round((checkOutDate.getTime() - todayUTC.getTime()) / 86400000);
+  const currentHour = now.getHours();
+  const currentMinute = now.getMinutes();
+
+  if (diffDays === 0) {
+    // Due today! Hotel leave time is strictly 12:00 PM
+    const isPastNoon = currentHour > 12 || (currentHour === 12 && currentMinute >= 0);
+    if (isPastNoon) {
+      return {
+        severity: "overdue_leave",
+        isOverdue: true,
+        badgeText: "Leave Time Arrived (Past 12:00 PM)",
+        shortBadge: "Leave Now (12 PM)",
+        diffDays: 0,
+      };
+    } else {
+      return {
+        severity: "leave_today",
+        isOverdue: false,
+        badgeText: "Leave Today by 12:00 PM",
+        shortBadge: "Due 12:00 PM",
+        diffDays: 0,
+      };
+    }
+  } else if (diffDays < 0) {
+    return {
+      severity: "overdue_leave",
+      isOverdue: true,
+      badgeText: "Overdue Leave (" + Math.abs(diffDays) + "d past 12 PM)",
+      shortBadge: "Overdue Leave",
+      diffDays,
+    };
+  }
+
+  return null;
+}
+
+export default function ReservationsListPage() {
+  // Special Guest Price Amendment
+  const [amendPriceModalOpen, setAmendPriceModalOpen] = useState(false);
+  const [selectedAmendRes, setSelectedAmendRes] = useState(null);
+
+  const handleOpenAmendPrice = (r) => {
+    setSelectedAmendRes(r);
+    setAmendPriceModalOpen(true);
+  };
+
+  const handleAmendPriceSuccess = async ({ reservationId, rate_per_night, reason }) => {
+    const res = await amendReservationPrice(reservationId, { rate_per_night, reason });
+    showToast(res.message || "Room price amended successfully and notification dispatched to Admin & Finance.");
+    loadReservations();
+  };
+
+  const today = new Date().toISOString().split("T")[0];
+  const departureAlerts = reservations.filter((r) => getReservationDepartureAlert(r) !== null);
+  const overdueDeparturesCount = departureAlerts.filter((r) => getReservationDepartureAlert(r)?.isOverdue).length;
+
+  const tomorrow = new Date(Date.now() + 86400000).toISOString().split("T")[0];
+
+  const [reservations, setReservations] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [search, setSearch] = useState("");
+  const [toast, setToast] = useState(null);
+
+  // New Reservation Modal state
+  const [newResModalOpen, setNewResModalOpen] = useState(false);
+  const [rooms, setRooms] = useState([]);
+  const [loadingRooms, setLoadingRooms] = useState(false);
+  const [submittingNewRes, setSubmittingNewRes] = useState(false);
+  const [newResForm, setNewResForm] = useState({
+    guest_name: "",
+    guest_phone: "",
+    guest_email: "",
+    guest_id_number: "",
+    id_image_file: null,
+    id_image_preview: null,
+    id_image_back_file: null,
+    id_image_back_preview: null,
+    room_id: "",
+    check_in_date: today,
+    check_out_date: tomorrow,
+    adults: 1,
+    children: 0,
+    rate_per_night: "",
+    initial_payment: "",
+    payment_method: "cash",
+    transaction_reference: "",
+    special_requests: "",
+  });
+
+  // Modals
+  const [paymentModalOpen, setPaymentModalOpen] = useState(false);
+  const [selectedRes, setSelectedRes] = useState(null);
+  const [payAmount, setPayAmount] = useState("");
+  const [payMethod, setPayMethod] = useState("cash");
+  const [payProof, setPayProof] = useState(null);
+  const [payNotes, setPayNotes] = useState("");
+
+  // Update Check-In / Guest ID Modal (Mobile Friendly)
+  const [updateIdModalOpen, setUpdateIdModalOpen] = useState(false);
+  const [selectedResForUpdate, setSelectedResForUpdate] = useState(null);
+  const [idUpdateForm, setIdUpdateForm] = useState({
+    guest_name: "",
+    guest_id_number: "",
+    guest_phone: "",
+    special_requests: "",
+    id_image_file: null,
+    id_image_preview: null,
+    existing_id_image_url: "",
+    id_image_back_file: null,
+    id_image_back_preview: null,
+    existing_id_image_back_url: "",
+  });
+  const [submittingIdUpdate, setSubmittingIdUpdate] = useState(false);
+
+  // Fullscreen ID Image Viewer Modal (Supports Front & Back)
+  const [idViewerModalOpen, setIdViewerModalOpen] = useState(false);
+  const [viewingIdFrontUrl, setViewingIdFrontUrl] = useState("");
+  const [viewingIdBackUrl, setViewingIdBackUrl] = useState("");
+  const [viewingSide, setViewingSide] = useState("front");
+
+  // Helper to build full backend image URL
+  const getFullImageUrl = (rawImage) => {
+    if (!rawImage) return "";
+    if (
+      rawImage.startsWith("data:") ||
+      rawImage.startsWith("http://") ||
+      rawImage.startsWith("https://")
+    ) {
+      return rawImage;
+    }
+    const backendBase =
+      import.meta.env.VITE_API_URL?.replace(/\/api\/?$/, "") ||
+      "http://localhost:5000";
+    const cleanPath = rawImage.startsWith("/") ? rawImage : `/${rawImage}`;
+    return `${backendBase}${cleanPath}`;
+  };
+
+  const showToast = (message, type = "success") => {
+    setToast({ message, type });
+    setTimeout(() => setToast(null), 3500);
+  };
+
+  const loadReservations = async () => {
+    try {
+      setLoading(true);
+      const res = await getReservations({ status: statusFilter, search });
+      setReservations(res.data || []);
+    } catch (err) {
+      showToast(err.message || "Failed to load reservations", "error");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Open New Reservation Modal
+  const handleOpenNewResModal = async () => {
+    setNewResForm({
+      guest_name: "",
+      guest_phone: "",
+      guest_email: "",
+      guest_id_number: "",
+      id_image_file: null,
+      id_image_preview: null,
+      id_image_back_file: null,
+      id_image_back_preview: null,
+      room_id: "",
+      check_in_date: today,
+      check_out_date: tomorrow,
+      adults: 1,
+      children: 0,
+      rate_per_night: "",
+      initial_payment: "",
+      payment_method: "cash",
+      transaction_reference: "",
+      special_requests: "",
+    });
+    setNewResModalOpen(true);
+    try {
+      setLoadingRooms(true);
+      const rRes = await getRooms();
+      setRooms(rRes.data || rRes.rooms || []);
+    } catch (err) {
+      console.error("Failed to load rooms:", err);
+    } finally {
+      setLoadingRooms(false);
+    }
+  };
+
+  // Save New Reservation (with Front and Back ID photos)
+  const handleSaveNewReservation = async (e) => {
+    e.preventDefault();
+    if (!newResForm.room_id) {
+      showToast("Please select a room", "error");
+      return;
+    }
+    if (!newResForm.guest_name.trim()) {
+      showToast("Guest name is required", "error");
+      return;
+    }
+
+    try {
+      setSubmittingNewRes(true);
+
+      let uploadedFrontUrl = null;
+      let uploadedBackUrl = null;
+      if (newResForm.id_image_file || newResForm.id_image_back_file) {
+        try {
+          const upRes = await uploadStandaloneGuestId(
+            newResForm.id_image_file,
+            newResForm.id_image_back_file
+          );
+          uploadedFrontUrl = upRes.imageUrl || upRes.frontImageUrl;
+          uploadedBackUrl = upRes.backImageUrl;
+        } catch (uploadErr) {
+          console.warn("Pre-upload ID failed, will fallback:", uploadErr);
+        }
+      }
+
+      const {
+        id_image_file,
+        id_image_preview,
+        id_image_back_file,
+        id_image_back_preview,
+        ...cleanForm
+      } = newResForm;
+
+      const created = await createReservation({
+        ...cleanForm,
+        id_image_url: uploadedFrontUrl || (id_image_preview ? id_image_preview : null),
+        id_image_back_url: uploadedBackUrl || (id_image_back_preview ? id_image_back_preview : null),
+        is_walkin: false,
+      });
+
+      const resId = created?.data?.id;
+      if (resId && (newResForm.id_image_file || newResForm.id_image_back_file) && (!uploadedFrontUrl && !uploadedBackUrl)) {
+        try {
+          await uploadGuestIdImage(resId, newResForm.id_image_file, newResForm.id_image_back_file);
+        } catch (uploadErr) {
+          console.warn("Fallback ID upload warning:", uploadErr);
+        }
+      }
+
+      showToast("Reservation created successfully with ID photos!");
+      setNewResModalOpen(false);
+      loadReservations();
+    } catch (err) {
+      showToast(err.message || "Failed to create reservation", "error");
+    } finally {
+      setSubmittingNewRes(false);
+    }
+  };
+
+  // Open Update ID Modal
+  const handleOpenUpdateIdModal = (res) => {
+    setSelectedResForUpdate(res);
+    setIdUpdateForm({
+      guest_name: res.guest_name || "",
+      guest_id_number: res.guest_id_number || "",
+      guest_phone: res.guest_phone || "",
+      special_requests: res.special_requests || "",
+      id_image_file: null,
+      id_image_preview: null,
+      existing_id_image_url: res.id_image_url || "",
+      id_image_back_file: null,
+      id_image_back_preview: null,
+      existing_id_image_back_url: res.id_image_back_url || "",
+    });
+    setUpdateIdModalOpen(true);
+  };
+
+  // Save ID Update (Front & Back)
+  const handleSaveIdUpdate = async (e) => {
+    e.preventDefault();
+    if (!selectedResForUpdate?.id) {
+      showToast("No reservation selected", "error");
+      return;
+    }
+
+    try {
+      setSubmittingIdUpdate(true);
+      const resId = selectedResForUpdate.id;
+
+      let uploadedFrontUrl = null;
+      let uploadedBackUrl = null;
+      if (idUpdateForm.id_image_file || idUpdateForm.id_image_back_file) {
+        try {
+          const sRes = await uploadStandaloneGuestId(
+            idUpdateForm.id_image_file,
+            idUpdateForm.id_image_back_file
+          );
+          uploadedFrontUrl = sRes.imageUrl || sRes.frontImageUrl;
+          uploadedBackUrl = sRes.backImageUrl;
+        } catch (sErr) {
+          console.warn("Standalone upload failed, trying endpoint:", sErr);
+          try {
+            const uploadRes = await uploadGuestIdImage(
+              resId,
+              idUpdateForm.id_image_file,
+              idUpdateForm.id_image_back_file
+            );
+            uploadedFrontUrl = uploadRes.imageUrl || uploadRes.data?.id_image_url;
+            uploadedBackUrl = uploadRes.backImageUrl || uploadRes.data?.id_image_back_url;
+          } catch (uploadErr) {
+            console.warn("Fallback multipart upload failed:", uploadErr);
+          }
+        }
+      }
+
+      await updateReservation(resId, {
+        guest_name: idUpdateForm.guest_name,
+        guest_id_number: idUpdateForm.guest_id_number,
+        guest_phone: idUpdateForm.guest_phone,
+        special_requests: idUpdateForm.special_requests,
+        ...(uploadedFrontUrl
+          ? { id_image_url: uploadedFrontUrl }
+          : idUpdateForm.id_image_preview
+          ? { id_image_url: idUpdateForm.id_image_preview }
+          : {}),
+        ...(uploadedBackUrl
+          ? { id_image_back_url: uploadedBackUrl }
+          : idUpdateForm.id_image_back_preview
+          ? { id_image_back_url: idUpdateForm.id_image_back_preview }
+          : {}),
+      });
+
+      showToast("Guest details and ID photos updated successfully!");
+      setUpdateIdModalOpen(false);
+      loadReservations();
+    } catch (err) {
+      showToast(err.message || "Failed to update check-in", "error");
+    } finally {
+      setSubmittingIdUpdate(false);
+    }
+  };
+
+  const handleViewIdImage = (frontUrl, backUrl = "") => {
+    setViewingIdFrontUrl(frontUrl || "");
+    setViewingIdBackUrl(backUrl || "");
+    setViewingSide(frontUrl ? "front" : (backUrl ? "back" : "front"));
+    setIdViewerModalOpen(true);
+  };
+
+  useEffect(() => {
+    loadReservations();
+  }, [statusFilter, search]);
+
+  const handleCheckIn = async (id, roomNum) => {
+    try {
+      await checkInReservation(id);
+      showToast(`Checked in to Room #${roomNum}`);
+      loadReservations();
+    } catch (err) {
+      showToast(err.message || "Check-in failed", "error");
+    }
+  };
+
+  const handleCancel = async (id) => {
+    const reason = window.prompt("Reason for cancellation:");
+    if (reason === null) return;
+    try {
+      await cancelReservation(id, reason);
+      showToast("Reservation cancelled");
+      loadReservations();
+    } catch (err) {
+      showToast(err.message || "Cancellation failed", "error");
+    }
+  };
+
+  const handleOpenPayment = (res) => {
+    setSelectedRes(res);
+    setPayAmount(String(res.balance || ""));
+    setPayMethod("cash");
+    setPayNotes("");
+    setPayProof(null);
+    setPaymentModalOpen(true);
+  };
+
+  
+  const handleProofCapture = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement("canvas");
+        let width = img.width;
+        let height = img.height;
+        const maxDim = 1200;
+        if (width > height && width > maxDim) {
+          height = Math.round((height * maxDim) / width);
+          width = maxDim;
+        } else if (height > maxDim) {
+          width = Math.round((width * maxDim) / height);
+          height = maxDim;
+        }
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, width, height);
+        setPayProof(canvas.toDataURL("image/jpeg", 0.7));
+      };
+      img.src = event.target.result;
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleRecordPayment = async (e) => {
+    e.preventDefault();
+    if (!payAmount || Number(payAmount) <= 0) {
+      showToast("Enter a valid payment amount", "error");
+      return;
+    }
+    try {
+      await addReservationPayment(selectedRes.id, {
+        amount: Number(payAmount),
+        payment_method: payMethod,
+        notes: payNotes,
+        receipt_image: payProof,
+        image_url: payProof,
+      });
+      showToast("Payment recorded successfully");
+      setPaymentModalOpen(false);
+      loadReservations();
+    } catch (err) {
+      showToast(err.message || "Payment failed", "error");
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      {/* Toast */}
+      {toast && (
+        <div
+          className={`fixed bottom-6 right-6 z-50 flex items-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold shadow-xl transition-all ${
+            toast.type === "error"
+              ? "bg-red-600 text-white"
+              : "bg-emerald-600 text-white"
+          }`}
+        >
+          {toast.type === "error" ? <XCircle size={18} /> : <CheckCircle2 size={18} />}
+          {toast.message}
+        </div>
+      )}
+
+      {/* Header controls */}
+      <div className="flex flex-col gap-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex flex-wrap gap-2">
+          {["all", "confirmed", "checked_in", "checked_out", "cancelled"].map((s) => (
+            <button
+              key={s}
+              onClick={() => setStatusFilter(s)}
+              className={`rounded-xl px-3.5 py-1.5 text-xs font-semibold capitalize transition ${
+                statusFilter === s
+                  ? "bg-slate-900 text-white shadow"
+                  : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+              }`}
+            >
+              {s.replace("_", " ")}
+            </button>
+          ))}
+        </div>
+
+        <div className="flex items-center gap-3">
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={15} />
+            <input
+              type="text"
+              placeholder="Search guest, code, room..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="w-full rounded-xl border border-slate-200 bg-white pl-8 pr-3 py-1.5 text-xs outline-none focus:border-blue-500 sm:w-64"
+            />
+          </div>
+
+          <button
+            type="button"
+            onClick={handleOpenNewResModal}
+            className="inline-flex items-center gap-1.5 rounded-xl bg-blue-600 px-4 py-2 text-xs font-bold text-white shadow-md shadow-blue-500/20 hover:bg-blue-700 transition shrink-0"
+          >
+            <Plus size={15} />
+            <span>New Reservation</span>
+          </button>
+        </div>
+      </div>
+
+      {/* Table */}
+      <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+        <table className="w-full text-left text-sm text-slate-600">
+          <thead className="border-b border-slate-200 bg-slate-50 text-xs font-semibold uppercase text-slate-500">
+            <tr>
+              <th className="px-6 py-4">Code</th>
+              <th className="px-6 py-4">Guest</th>
+              <th className="px-6 py-4">Room</th>
+              <th className="px-6 py-4">Check-In / Out</th>
+              <th className="px-6 py-4">Total / Paid</th>
+              <th className="px-6 py-4">Status</th>
+              <th className="px-6 py-4 text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {reservations.map((r) => {
+              const totalAmt = Number(r.total_amount || 0);
+              const paidAmt = Number(r.paid_amount || 0);
+              const balance = Math.max(0, totalAmt - paidAmt);
+              const totalNights = Math.max(1, Number(r.total_nights || 1));
+              let nightlyRate = Number(r.rate_per_night || 0);
+              if (nightlyRate <= 0 && totalNights > 0 && totalAmt > 0) {
+                nightlyRate = totalAmt / totalNights;
+              }
+              const paidNights = nightlyRate > 0 ? Math.floor(paidAmt / nightlyRate) : 0;
+              const unpaidNights = Math.max(0, totalNights - paidNights);
+
+              let paidThroughStr = null;
+              let isExpired = false;
+              let isDueToday = false;
+              let isDueTomorrow = false;
+
+              if (r.check_in_date && balance > 0) {
+                const checkInRaw = String(r.check_in_date).split("T")[0];
+                const parts = checkInRaw.split("-").map(Number);
+                if (parts.length === 3 && !parts.some(isNaN)) {
+                  const [y, m, d] = parts;
+                  const checkInDate = new Date(Date.UTC(y, m - 1, d));
+                  const ptDate = new Date(checkInDate.getTime() + paidNights * 86400000);
+                  paidThroughStr = ptDate.toISOString().split("T")[0];
+
+                  const now = new Date();
+                  const todayUTC = new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()));
+                  const diff = Math.round((ptDate.getTime() - todayUTC.getTime()) / 86400000);
+
+                  if (diff < 0 && r.status !== 'cancelled' && r.status !== 'checked_out') isExpired = true;
+                  if (diff === 0 && r.status !== 'cancelled' && r.status !== 'checked_out') isDueToday = true;
+                  if (diff === 1 && r.status !== 'cancelled' && r.status !== 'checked_out') isDueTomorrow = true;
+                }
+              }
+
+              const departureAlert = getReservationDepartureAlert(r);
+
+              return (
+                <tr key={r.id} className="hover:bg-slate-50/80 transition">
+                  <td className="px-6 py-4 font-mono font-bold text-blue-600">
+                    {r.reservation_code}
+                  </td>
+                  <td className="px-6 py-4">
+                    <p className="font-semibold text-slate-900">{r.guest_name}</p>
+                    {r.guest_phone && (
+                      <p className="text-xs text-slate-400">{r.guest_phone}</p>
+                    )}
+                    {r.guest_id_number && (
+                      <p className="text-[11px] text-slate-500 font-mono">ID: {r.guest_id_number}</p>
+                    )}
+                    <div className="mt-2 flex flex-col gap-1.5">
+                      {r.id_image_url || r.id_image_back_url ? (
+                        <div className="flex items-center gap-2">
+                          <div className="flex items-center gap-1.5">
+                            {r.id_image_url && (
+                              <button
+                                type="button"
+                                onClick={() => handleViewIdImage(r.id_image_url, r.id_image_back_url)}
+                                className="group relative h-9 w-12 shrink-0 overflow-hidden rounded-lg border border-emerald-300 shadow-sm transition hover:scale-105"
+                                title="Click to view Front ID"
+                              >
+                                <img
+                                  src={getFullImageUrl(r.id_image_url)}
+                                  alt="Front ID"
+                                  className="h-full w-full object-cover"
+                                />
+                                <span className="absolute bottom-0 inset-x-0 bg-slate-950/70 text-[9px] font-bold text-white text-center py-0.2">
+                                  Front
+                                </span>
+                              </button>
+                            )}
+
+                            {r.id_image_back_url && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  handleViewIdImage(r.id_image_url, r.id_image_back_url);
+                                  setViewingSide("back");
+                                }}
+                                className="group relative h-9 w-12 shrink-0 overflow-hidden rounded-lg border border-emerald-300 shadow-sm transition hover:scale-105"
+                                title="Click to view Back ID"
+                              >
+                                <img
+                                  src={getFullImageUrl(r.id_image_back_url)}
+                                  alt="Back ID"
+                                  className="h-full w-full object-cover"
+                                />
+                                <span className="absolute bottom-0 inset-x-0 bg-slate-950/70 text-[9px] font-bold text-white text-center py-0.2">
+                                  Back
+                                </span>
+                              </button>
+                            )}
+                          </div>
+
+                          <div className="flex flex-col gap-0.5">
+                            <button
+                              type="button"
+                              onClick={() => handleViewIdImage(r.id_image_url, r.id_image_back_url)}
+                              className="inline-flex items-center gap-1 rounded-md bg-emerald-50 px-2 py-0.5 text-[11px] font-bold text-emerald-700 hover:bg-emerald-100 transition"
+                            >
+                              <Check size={11} />
+                              {r.id_image_url && r.id_image_back_url
+                                ? "ðŸªª Front & Back Attached"
+                                : r.id_image_url
+                                ? "ðŸªª Front Attached"
+                                : "ðŸªª Back Attached"}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleOpenUpdateIdModal(r)}
+                              className="text-[10px] text-slate-500 hover:text-blue-600 font-medium hover:underline text-left"
+                            >
+                              {!r.id_image_back_url ? "+ Add Back ID" : "Edit / Change photos"}
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => handleOpenUpdateIdModal(r)}
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1 text-xs font-bold text-blue-700 hover:bg-blue-100 transition shadow-sm w-fit"
+                        >
+                          <Camera size={13} />
+                          <span>+ Add ID (Front & Back)</span>
+                        </button>
+                      )}
+                    </div>
+                  </td>
+                  <td className="px-6 py-4">
+                    <span className="font-bold text-slate-800">Room #{r.room_number}</span>
+                    <p className="text-xs text-slate-400">{r.room_type_name}</p>
+                  </td>
+                  <td className="px-6 py-4 text-xs">
+                    <p className="text-slate-800 font-medium">In: {r.check_in_date?.split("T")[0]}</p>
+                    <p className="text-slate-500">Out: {r.check_out_date?.split("T")[0]}</p>
+                    {departureAlert && (
+                      <div className="mt-1">
+                        {departureAlert.isOverdue ? (
+                          <span className="inline-flex items-center gap-1 rounded bg-rose-600 px-1.5 py-0.5 text-[10px] font-black text-white animate-pulse shadow-2xs">
+                            <Clock size={10} />
+                            {departureAlert.badgeText}
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 rounded bg-amber-400 px-1.5 py-0.5 text-[10px] font-bold text-slate-950 shadow-2xs">
+                            <Clock size={10} />
+                            {departureAlert.badgeText}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                    <p className="text-[11px] text-slate-400 mt-0.5">{totalNights} Night(s)</p>
+                  </td>
+                  <td className="px-6 py-4 text-xs">
+                    <div className="flex items-center gap-1.5">
+                      <p className="font-bold text-slate-900">{totalAmt.toLocaleString()} ETB</p>
+                      {balance <= 0 ? (
+                        <span className="rounded bg-emerald-50 px-1.5 py-0.2 text-[10px] font-bold text-emerald-700">
+                          Paid
+                        </span>
+                      ) : isExpired ? (
+                        <span className="rounded bg-rose-100 text-rose-800 px-1.5 py-0.2 text-[9px] font-extrabold animate-pulse">
+                          Expired
+                        </span>
+                      ) : isDueToday ? (
+                        <span className="rounded bg-rose-100 text-rose-800 px-1.5 py-0.2 text-[9px] font-extrabold">
+                          Due Today
+                        </span>
+                      ) : isDueTomorrow ? (
+                        <span className="rounded bg-amber-100 text-amber-900 px-1.5 py-0.2 text-[9px] font-extrabold">
+                          Due Tomorrow
+                        </span>
+                      ) : null}
+                    </div>
+
+                    {balance > 0 ? (
+                      <div className="mt-0.5 space-y-0.5">
+                        <p className="text-rose-600 font-bold font-mono">
+                          Due: {balance.toLocaleString()} ETB ({unpaidNights}n unpaid)
+                        </p>
+                        {paidThroughStr && (
+                          <p className="text-[10px] text-slate-500">
+                            Covered to: <strong className="text-slate-700">{paidThroughStr}</strong> ({paidNights}n)
+                          </p>
+                        )}
+                      </div>
+                    ) : (
+                      <p className="text-emerald-600 text-[11px] font-medium mt-0.5">
+                        Fully Covered
+                      </p>
+                    )}
+                  </td>
+                  <td className="px-6 py-4">
+                    <span
+                      className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold capitalize ${
+                        STATUS_COLORS[r.status] || "bg-slate-100 text-slate-700"
+                      }`}
+                    >
+                      {r.status.replace("_", " ")}
+                    </span>
+                  </td>
+                  <td className="px-6 py-4 text-right">
+                    <div className="flex items-center justify-end gap-1.5">
+                      <button
+                        onClick={() => handleOpenUpdateIdModal(r)}
+                        className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50 transition flex items-center gap-1 shadow-sm"
+                        title="Update guest details or upload ID photo"
+                      >
+                        <Camera size={12} className="text-blue-600" />
+                        ID / Edit
+                      </button>
+
+                      {(r.status === "confirmed" || r.status === "checked_in") && (
+                        <button
+                          type="button"
+                          onClick={() => handleOpenAmendPrice(r)}
+                          className="rounded-lg border border-amber-300 bg-amber-50 px-2.5 py-1 text-xs font-bold text-amber-900 hover:bg-amber-100 transition flex items-center gap-1 shadow-sm cursor-pointer"
+                          title="Amend Room Price for Special Guest"
+                        >
+                          <DollarSign size={12} className="text-amber-700" />
+                          Amend Price
+                        </button>
+                      )}
+
+                      {r.status === "confirmed" && (
+                        <button
+                          onClick={() => handleCheckIn(r.id, r.room_number)}
+                          className="rounded-lg bg-blue-600 px-3 py-1 text-xs font-semibold text-white hover:bg-blue-700 transition"
+                        >
+                          Check-In
+                        </button>
+                      )}
+
+                      {(r.status === "checked_in" || r.status === "confirmed") && balance > 0 && (
+                        <button
+                          onClick={() => handleOpenPayment(r)}
+                          className="rounded-lg bg-emerald-600 px-3 py-1 text-xs font-semibold text-white hover:bg-emerald-700 transition"
+                        >
+                          Add Payment
+                        </button>
+                      )}
+
+                      {r.status === "confirmed" && (
+                        <button
+                          onClick={() => handleCancel(r.id)}
+                          className="rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1 text-xs font-semibold text-rose-600 hover:bg-rose-100 transition"
+                        >
+                          Cancel
+                        </button>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+            {reservations.length === 0 && (
+              <tr>
+                <td colSpan={7} className="py-8 text-center text-slate-400">
+                  No reservations found.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      {/* ====================================================
+          MODAL: NEW RESERVATION WITH ID PHOTO
+      ==================================================== */}
+      {newResModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-sm overflow-y-auto">
+          <div className="w-full max-w-xl rounded-3xl bg-white shadow-2xl overflow-hidden my-6">
+            <div className="flex items-center justify-between border-b border-slate-100 p-5 bg-gradient-to-r from-blue-50/60 to-indigo-50/60">
+              <div className="flex items-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-blue-600 text-white shadow-md shadow-blue-500/20">
+                  <CalendarCheck size={20} />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-slate-900">
+                    New Room Reservation
+                  </h3>
+                  <p className="text-xs text-slate-500 font-medium">
+                    Book a room and attach guest identification photo
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setNewResModalOpen(false)}
+                className="rounded-full p-2 text-slate-400 hover:bg-white hover:text-slate-600 transition shadow-sm"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveNewReservation} className="p-6 space-y-4 max-h-[80vh] overflow-y-auto">
+              {/* Guest Details Section */}
+              <div>
+                <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">
+                  Guest Information
+                </h4>
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Full Name *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="e.g. John Doe"
+                      value={newResForm.guest_name}
+                      onChange={(e) => setNewResForm({ ...newResForm, guest_name: e.target.value })}
+                      className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm outline-none focus:border-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Phone Number
+                    </label>
+                    <input
+                      type="tel"
+                      placeholder="+251 91 234 5678"
+                      value={newResForm.guest_phone}
+                      onChange={(e) => setNewResForm({ ...newResForm, guest_phone: e.target.value })}
+                      className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm outline-none focus:border-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Email Address
+                    </label>
+                    <input
+                      type="email"
+                      placeholder="guest@example.com"
+                      value={newResForm.guest_email}
+                      onChange={(e) => setNewResForm({ ...newResForm, guest_email: e.target.value })}
+                      className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm outline-none focus:border-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      ID / Passport No.
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="e.g. EP1234567"
+                      value={newResForm.guest_id_number}
+                      onChange={(e) => setNewResForm({ ...newResForm, guest_id_number: e.target.value })}
+                      className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm outline-none focus:border-blue-500"
+                    />
+                  </div>
+
+                  {/* ID Photo Capture / Upload Card */}
+                  {/* Guest ID Photo (Front & Back) */}
+                  <div className="sm:col-span-2">
+                    <label className="block text-xs font-bold text-slate-800 mb-2 flex items-center justify-between">
+                      <span className="flex items-center gap-1.5">
+                        <Camera size={14} className="text-blue-600" />
+                        Guest ID / Passport Photos (Front & Back)
+                      </span>
+                      <span className="text-[11px] text-slate-400 font-normal">
+                        Optional but recommended
+                      </span>
+                    </label>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      {/* FRONT OF ID */}
+                      <div className="rounded-2xl border border-slate-200 bg-slate-50/50 p-3">
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="text-xs font-bold text-slate-700 flex items-center gap-1">
+                            <span className="flex h-5 w-5 items-center justify-center rounded-full bg-blue-100 text-blue-700 text-[10px] font-bold">1</span>
+                            Front Side of ID
+                          </span>
+                          {newResForm.id_image_preview && (
+                            <button
+                              type="button"
+                              onClick={() => setNewResForm({ ...newResForm, id_image_file: null, id_image_preview: null })}
+                              className="text-[11px] text-rose-600 hover:underline font-semibold"
+                            >
+                              Remove
+                            </button>
+                          )}
+                        </div>
+
+                        {newResForm.id_image_preview ? (
+                          <div className="relative rounded-xl border border-blue-200 bg-white p-2 text-center">
+                            <img
+                              src={newResForm.id_image_preview}
+                              alt="Front ID Preview"
+                              className="h-28 w-full object-contain rounded-lg border border-slate-100 shadow-sm"
+                            />
+                            <p className="text-[11px] text-emerald-600 font-medium flex items-center justify-center gap-1 mt-1.5">
+                              <Check size={12} /> Front ID ready
+                            </p>
+                            <label className="mt-1.5 inline-block cursor-pointer rounded-lg bg-slate-100 px-3 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-200">
+                              Retake Front
+                              <input
+                                type="file"
+                                accept="image/*"
+                                capture="environment"
+                                className="hidden"
+                                onChange={(e) => {
+                                  const file = e.target.files?.[0];
+                                  if (file) {
+                                    const reader = new FileReader();
+                                    reader.onload = (ev) => {
+                                      setNewResForm({
+                                        ...newResForm,
+                                        id_image_file: file,
+                                        id_image_preview: ev.target.result,
+                                      });
+                                    };
+                                    reader.readAsDataURL(file);
+                                  }
+                                }}
+                              />
+                            </label>
+                          </div>
+                        ) : (
+                          <label className="flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed border-slate-300 bg-white p-4 transition hover:border-blue-400 hover:bg-blue-50/20 text-center">
+                            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-blue-50 text-blue-600 mb-2 shadow-sm">
+                              <Camera size={16} />
+                            </div>
+                            <span className="text-xs font-bold text-slate-800">
+                              Snap Front of ID
+                            </span>
+                            <span className="text-[10px] text-slate-400 mt-0.5">
+                              Camera or file browse
+                            </span>
+                            <input
+                              type="file"
+                              accept="image/*"
+                              capture="environment"
+                              className="hidden"
+                              onChange={(e) => {
+                                const file = e.target.files?.[0];
+                                if (file) {
+                                  const reader = new FileReader();
+                                  reader.onload = (ev) => {
+                                    setNewResForm({
+                                      ...newResForm,
+                                      id_image_file: file,
+                                      id_image_preview: ev.target.result,
+                                    });
+                                  };
+                                  reader.readAsDataURL(file);
+                                }
+                              }}
+                            />
+                          </label>
+                        )}
+                      </div>
+
+                      {/* BACK OF ID */}
+                      <div className="rounded-2xl border border-slate-200 bg-slate-50/50 p-3">
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="text-xs font-bold text-slate-700 flex items-center gap-1">
+                            <span className="flex h-5 w-5 items-center justify-center rounded-full bg-indigo-100 text-indigo-700 text-[10px] font-bold">2</span>
+                            Back Side of ID
+                          </span>
+                          {newResForm.id_image_back_preview && (
+                            <button
+                              type="button"
+                              onClick={() => setNewResForm({ ...newResForm, id_image_back_file: null, id_image_back_preview: null })}
+                              className="text-[11px] text-rose-600 hover:underline font-semibold"
+                            >
+                              Remove
+                            </button>
+                          )}
+                        </div>
+
+                        {newResForm.id_image_back_preview ? (
+                          <div className="relative rounded-xl border border-indigo-200 bg-white p-2 text-center">
+                            <img
+                              src={newResForm.id_image_back_preview}
+                              alt="Back ID Preview"
+                              className="h-28 w-full object-contain rounded-lg border border-slate-100 shadow-sm"
+                            />
+                            <p className="text-[11px] text-emerald-600 font-medium flex items-center justify-center gap-1 mt-1.5">
+                              <Check size={12} /> Back ID ready
+                            </p>
+                            <label className="mt-1.5 inline-block cursor-pointer rounded-lg bg-slate-100 px-3 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-200">
+                              Retake Back
+                              <input
+                                type="file"
+                                accept="image/*"
+                                capture="environment"
+                                className="hidden"
+                                onChange={(e) => {
+                                  const file = e.target.files?.[0];
+                                  if (file) {
+                                    const reader = new FileReader();
+                                    reader.onload = (ev) => {
+                                      setNewResForm({
+                                        ...newResForm,
+                                        id_image_back_file: file,
+                                        id_image_back_preview: ev.target.result,
+                                      });
+                                    };
+                                    reader.readAsDataURL(file);
+                                  }
+                                }}
+                              />
+                            </label>
+                          </div>
+                        ) : (
+                          <label className="flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed border-slate-300 bg-white p-4 transition hover:border-indigo-400 hover:bg-indigo-50/20 text-center">
+                            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-50 text-indigo-600 mb-2 shadow-sm">
+                              <Camera size={16} />
+                            </div>
+                            <span className="text-xs font-bold text-slate-800">
+                              Snap Back of ID
+                            </span>
+                            <span className="text-[10px] text-slate-400 mt-0.5">
+                              Camera or file browse
+                            </span>
+                            <input
+                              type="file"
+                              accept="image/*"
+                              capture="environment"
+                              className="hidden"
+                              onChange={(e) => {
+                                const file = e.target.files?.[0];
+                                if (file) {
+                                  const reader = new FileReader();
+                                  reader.onload = (ev) => {
+                                    setNewResForm({
+                                      ...newResForm,
+                                      id_image_back_file: file,
+                                      id_image_back_preview: ev.target.result,
+                                    });
+                                  };
+                                  reader.readAsDataURL(file);
+                                }
+                              }}
+                            />
+                          </label>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Room & Stay Details */}
+              <div className="pt-2 border-t border-slate-100">
+                <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">
+                  Stay Details
+                </h4>
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <div className="sm:col-span-2">
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Room *
+                    </label>
+                    <select
+                      required
+                      value={newResForm.room_id}
+                      onChange={(e) => {
+                        const rId = e.target.value;
+                        const sel = rooms.find((r) => String(r.id) === rId);
+                        setNewResForm({
+                          ...newResForm,
+                          room_id: rId,
+                          rate_per_night: sel?.base_rate ? String(sel.base_rate) : newResForm.rate_per_night,
+                        });
+                      }}
+                      className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm outline-none focus:border-blue-500"
+                    >
+                      <option value="">-- Select Room --</option>
+                      {rooms.map((r) => (
+                        <option key={r.id} value={r.id}>
+                          Room #{r.room_number} ({r.room_type_name || r.type_name || "Standard"}) - Floor {r.floor} â€¢ ${r.base_rate || 0}/night [{r.status}]
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Check-In Date *
+                    </label>
+                    <input
+                      type="date"
+                      required
+                      value={newResForm.check_in_date}
+                      onChange={(e) => setNewResForm({ ...newResForm, check_in_date: e.target.value })}
+                      className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm outline-none focus:border-blue-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Check-Out Date *
+                    </label>
+                    <input
+                      type="date"
+                      required
+                      value={newResForm.check_out_date}
+                      onChange={(e) => setNewResForm({ ...newResForm, check_out_date: e.target.value })}
+                      className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm outline-none focus:border-blue-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Adults
+                    </label>
+                    <input
+                      type="number"
+                      min="1"
+                      value={newResForm.adults}
+                      onChange={(e) => setNewResForm({ ...newResForm, adults: parseInt(e.target.value, 10) || 1 })}
+                      className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm outline-none focus:border-blue-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Children
+                    </label>
+                    <input
+                      type="number"
+                      min="0"
+                      value={newResForm.children}
+                      onChange={(e) => setNewResForm({ ...newResForm, children: parseInt(e.target.value, 10) || 0 })}
+                      className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm outline-none focus:border-blue-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Rate per Night ($)
+                    </label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      placeholder="e.g. 75.00"
+                      value={newResForm.rate_per_night}
+                      onChange={(e) => setNewResForm({ ...newResForm, rate_per_night: e.target.value })}
+                      className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm outline-none focus:border-blue-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Initial Deposit / Payment ($)
+                    </label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      placeholder="0.00"
+                      value={newResForm.initial_payment}
+                      onChange={(e) => setNewResForm({ ...newResForm, initial_payment: e.target.value })}
+                      className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm outline-none focus:border-blue-500"
+                    />
+                  </div>
+
+                  <div className="sm:col-span-2">
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Payment Method
+                    </label>
+                    <select
+                      value={newResForm.payment_method}
+                      onChange={(e) => setNewResForm({ ...newResForm, payment_method: e.target.value })}
+                      className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm outline-none focus:border-blue-500"
+                    >
+                      <option value="cash">ðŸ’µ Cash</option>
+                  <option value="transfer">ðŸ“² Transfer</option>
+                  <option value="pos_machine">ðŸ’³ POS Machine</option>
+                    </select>
+                  </div>
+
+                  <div className="sm:col-span-2">
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Special Requests / Notes
+                    </label>
+                    <textarea
+                      rows={2}
+                      placeholder="Guest preferences, airport pickup, late arrival..."
+                      value={newResForm.special_requests}
+                      onChange={(e) => setNewResForm({ ...newResForm, special_requests: e.target.value })}
+                      className="w-full rounded-xl border border-slate-200 px-3.5 py-2 text-sm outline-none focus:border-blue-500"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Actions */}
+              <div className="flex items-center justify-end gap-3 pt-4 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setNewResModalOpen(false)}
+                  className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-600 hover:bg-slate-50 transition"
+                  disabled={submittingNewRes}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={submittingNewRes}
+                  className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-6 py-2.5 text-sm font-bold text-white shadow-lg shadow-blue-500/20 hover:bg-blue-700 transition disabled:opacity-50"
+                >
+                  {submittingNewRes ? (
+                    <>
+                      <Loader2 size={16} className="animate-spin" />
+                      Creating Reservation...
+                    </>
+                  ) : (
+                    <>
+                      <Check size={16} />
+                      Confirm Reservation
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Payment Modal */}
+      {paymentModalOpen && selectedRes && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-sm rounded-3xl bg-white p-6 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3 mb-4">
+              <h3 className="text-base font-bold text-slate-900">
+                Collect Payment ({selectedRes.reservation_code})
+              </h3>
+              <button
+                onClick={() => setPaymentModalOpen(false)}
+                className="rounded-full p-1.5 text-slate-400 hover:bg-slate-100"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <form onSubmit={handleRecordPayment} className="space-y-3">
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Amount *
+                </label>
+                <input
+                  type="number"
+                  step="0.01"
+                  required
+                  value={payAmount}
+                  onChange={(e) => setPayAmount(e.target.value)}
+                  className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-blue-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Method *
+                </label>
+                <select
+                  value={payMethod}
+                  onChange={(e) => setPayMethod(e.target.value)}
+                  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500"
+                >
+                  <option value="cash">ðŸ’µ Cash</option>
+                  <option value="transfer">ðŸ“² Transfer</option>
+                  <option value="pos_machine">ðŸ’³ POS Machine</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Notes</label>
+                <input
+                  type="text"
+                  placeholder="Optional reference / note"
+                  value={payNotes}
+                  onChange={(e) => setPayNotes(e.target.value)}
+                  className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-blue-500"
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setPaymentModalOpen(false)}
+                  className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="rounded-xl bg-emerald-600 px-5 py-2 text-xs font-bold text-white hover:bg-emerald-700 shadow-md"
+                >
+                  Record Payment
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ====================================================
+          MODAL: UPDATE CHECK-IN & GUEST ID (MOBILE FRIENDLY)
+      ==================================================== */}
+      {updateIdModalOpen && selectedResForUpdate && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-sm overflow-y-auto">
+          <div className="w-full max-w-lg rounded-3xl bg-white shadow-2xl overflow-hidden my-6">
+            <div className="flex items-center justify-between border-b border-slate-100 p-5 bg-gradient-to-r from-blue-50/50 to-indigo-50/50">
+              <div className="flex items-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-blue-600 text-white shadow-md shadow-blue-500/20">
+                  <Camera size={20} />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-slate-900">
+                    Update Check-In / Guest ID
+                  </h3>
+                  <p className="text-xs text-slate-500 font-medium">
+                    Room #{selectedResForUpdate.room_number} â€¢ {selectedResForUpdate.reservation_code || "Active Stay"}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setUpdateIdModalOpen(false)}
+                className="rounded-full p-2 text-slate-400 hover:bg-white hover:text-slate-600 transition shadow-sm"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveIdUpdate} className="p-6 space-y-4">
+              {/* Dual Photo Area (Front & Back) */}
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                    <Camera size={14} className="text-blue-600" />
+                    Guest ID Photos (Front & Back)
+                  </label>
+                  <span className="text-[11px] text-slate-400">
+                    Capture or browse both sides
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {/* Front Side Card */}
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50/50 p-3">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xs font-bold text-slate-700 flex items-center gap-1">
+                        <span className="flex h-4 w-4 items-center justify-center rounded-full bg-blue-100 text-[10px] font-bold text-blue-700">1</span>
+                        Front Side of ID
+                      </span>
+                      {idUpdateForm.id_image_preview && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setIdUpdateForm({
+                              ...idUpdateForm,
+                              id_image_file: null,
+                              id_image_preview: null,
+                            })
+                          }
+                          className="text-[11px] text-rose-600 hover:underline font-semibold"
+                        >
+                          Clear New
+                        </button>
+                      )}
+                    </div>
+
+                    {idUpdateForm.id_image_preview ? (
+                      <div className="relative rounded-xl border border-blue-300 bg-blue-50/50 p-2 text-center">
+                        <img
+                          src={idUpdateForm.id_image_preview}
+                          alt="Front ID Preview"
+                          className="mx-auto max-h-36 w-full object-contain rounded-lg border border-blue-200 shadow-sm"
+                        />
+                        <p className="mt-1 text-[11px] font-semibold text-blue-700 flex items-center justify-center gap-1">
+                          <Check size={12} /> New Front Captured
+                        </p>
+                        <label className="mt-1.5 inline-flex items-center gap-1 cursor-pointer rounded-lg bg-white border border-slate-200 px-3 py-1 text-xs font-bold text-slate-700 shadow-sm hover:bg-slate-50">
+                          <Camera size={12} className="text-blue-600" /> Retake Front
+                          <input
+                            type="file"
+                            accept="image/*"
+                            capture="environment"
+                            className="hidden"
+                            onChange={(e) => {
+                              const file = e.target.files?.[0];
+                              if (file) {
+                                const reader = new FileReader();
+                                reader.onload = (ev) => {
+                                  setIdUpdateForm({
+                                    ...idUpdateForm,
+                                    id_image_file: file,
+                                    id_image_preview: ev.target.result,
+                                  });
+                                };
+                                reader.readAsDataURL(file);
+                              }
+                            }}
+                          />
+                        </label>
+                      </div>
+                    ) : idUpdateForm.existing_id_image_url ? (
+                      <div className="relative rounded-xl border border-slate-200 bg-white p-2 text-center">
+                        <img
+                          src={getFullImageUrl(idUpdateForm.existing_id_image_url)}
+                          alt="Current Front ID"
+                          className="mx-auto max-h-36 w-full object-contain rounded-lg border border-slate-200 shadow-sm cursor-pointer hover:opacity-90 transition"
+                          onClick={() => handleViewIdImage(idUpdateForm.existing_id_image_url, idUpdateForm.existing_id_image_back_url)}
+                        />
+                        <div className="mt-2 flex items-center justify-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => handleViewIdImage(idUpdateForm.existing_id_image_url, idUpdateForm.existing_id_image_back_url)}
+                            className="rounded-lg bg-slate-800 px-2.5 py-1 text-[11px] font-bold text-white hover:bg-slate-900 flex items-center gap-1"
+                          >
+                            <Eye size={12} /> View
+                          </button>
+                          <label className="inline-flex items-center gap-1 cursor-pointer rounded-lg bg-blue-600 px-2.5 py-1 text-[11px] font-bold text-white hover:bg-blue-700 transition">
+                            <Camera size={12} /> Replace
+                            <input
+                              type="file"
+                              accept="image/*"
+                              capture="environment"
+                              className="hidden"
+                              onChange={(e) => {
+                                const file = e.target.files?.[0];
+                                if (file) {
+                                  const reader = new FileReader();
+                                  reader.onload = (ev) => {
+                                    setIdUpdateForm({
+                                      ...idUpdateForm,
+                                      id_image_file: file,
+                                      id_image_preview: ev.target.result,
+                                    });
+                                  };
+                                  reader.readAsDataURL(file);
+                                }
+                              }}
+                            />
+                          </label>
+                        </div>
+                      </div>
+                    ) : (
+                      <label className="flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed border-slate-300 bg-white p-5 transition hover:border-blue-400 hover:bg-blue-50/20 text-center">
+                        <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-blue-50 text-blue-600 mb-2 shadow-sm">
+                          <Camera size={18} />
+                        </div>
+                        <span className="text-xs font-bold text-slate-800">
+                          Snap Front Side
+                        </span>
+                        <span className="text-[10px] text-slate-400 mt-0.5">
+                          Camera or browse file
+                        </span>
+                        <input
+                          type="file"
+                          accept="image/*"
+                          capture="environment"
+                          className="hidden"
+                          onChange={(e) => {
+                            const file = e.target.files?.[0];
+                            if (file) {
+                              const reader = new FileReader();
+                              reader.onload = (ev) => {
+                                setIdUpdateForm({
+                                  ...idUpdateForm,
+                                  id_image_file: file,
+                                  id_image_preview: ev.target.result,
+                                });
+                              };
+                              reader.readAsDataURL(file);
+                            }
+                          }}
+                        />
+                      </label>
+                    )}
+                  </div>
+
+                  {/* Back Side Card */}
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50/50 p-3">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xs font-bold text-slate-700 flex items-center gap-1">
+                        <span className="flex h-4 w-4 items-center justify-center rounded-full bg-indigo-100 text-[10px] font-bold text-indigo-700">2</span>
+                        Back Side of ID
+                      </span>
+                      {idUpdateForm.id_image_back_preview && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setIdUpdateForm({
+                              ...idUpdateForm,
+                              id_image_back_file: null,
+                              id_image_back_preview: null,
+                            })
+                          }
+                          className="text-[11px] text-rose-600 hover:underline font-semibold"
+                        >
+                          Clear New
+                        </button>
+                      )}
+                    </div>
+
+                    {idUpdateForm.id_image_back_preview ? (
+                      <div className="relative rounded-xl border border-indigo-300 bg-indigo-50/50 p-2 text-center">
+                        <img
+                          src={idUpdateForm.id_image_back_preview}
+                          alt="Back ID Preview"
+                          className="mx-auto max-h-36 w-full object-contain rounded-lg border border-indigo-200 shadow-sm"
+                        />
+                        <p className="mt-1 text-[11px] font-semibold text-indigo-700 flex items-center justify-center gap-1">
+                          <Check size={12} /> New Back Captured
+                        </p>
+                        <label className="mt-1.5 inline-flex items-center gap-1 cursor-pointer rounded-lg bg-white border border-slate-200 px-3 py-1 text-xs font-bold text-slate-700 shadow-sm hover:bg-slate-50">
+                          <Camera size={12} className="text-indigo-600" /> Retake Back
+                          <input
+                            type="file"
+                            accept="image/*"
+                            capture="environment"
+                            className="hidden"
+                            onChange={(e) => {
+                              const file = e.target.files?.[0];
+                              if (file) {
+                                const reader = new FileReader();
+                                reader.onload = (ev) => {
+                                  setIdUpdateForm({
+                                    ...idUpdateForm,
+                                    id_image_back_file: file,
+                                    id_image_back_preview: ev.target.result,
+                                  });
+                                };
+                                reader.readAsDataURL(file);
+                              }
+                            }}
+                          />
+                        </label>
+                      </div>
+                    ) : idUpdateForm.existing_id_image_back_url ? (
+                      <div className="relative rounded-xl border border-slate-200 bg-white p-2 text-center">
+                        <img
+                          src={getFullImageUrl(idUpdateForm.existing_id_image_back_url)}
+                          alt="Current Back ID"
+                          className="mx-auto max-h-36 w-full object-contain rounded-lg border border-slate-200 shadow-sm cursor-pointer hover:opacity-90 transition"
+                          onClick={() => handleViewIdImage(idUpdateForm.existing_id_image_url, idUpdateForm.existing_id_image_back_url)}
+                        />
+                        <div className="mt-2 flex items-center justify-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => handleViewIdImage(idUpdateForm.existing_id_image_url, idUpdateForm.existing_id_image_back_url)}
+                            className="rounded-lg bg-slate-800 px-2.5 py-1 text-[11px] font-bold text-white hover:bg-slate-900 flex items-center gap-1"
+                          >
+                            <Eye size={12} /> View
+                          </button>
+                          <label className="inline-flex items-center gap-1 cursor-pointer rounded-lg bg-indigo-600 px-2.5 py-1 text-[11px] font-bold text-white hover:bg-indigo-700 transition">
+                            <Camera size={12} /> Replace
+                            <input
+                              type="file"
+                              accept="image/*"
+                              capture="environment"
+                              className="hidden"
+                              onChange={(e) => {
+                                const file = e.target.files?.[0];
+                                if (file) {
+                                  const reader = new FileReader();
+                                  reader.onload = (ev) => {
+                                    setIdUpdateForm({
+                                      ...idUpdateForm,
+                                      id_image_back_file: file,
+                                      id_image_back_preview: ev.target.result,
+                                    });
+                                  };
+                                  reader.readAsDataURL(file);
+                                }
+                              }}
+                            />
+                          </label>
+                        </div>
+                      </div>
+                    ) : (
+                      <label className="flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed border-slate-300 bg-white p-5 transition hover:border-indigo-400 hover:bg-indigo-50/20 text-center">
+                        <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-indigo-50 text-indigo-600 mb-2 shadow-sm">
+                          <Camera size={18} />
+                        </div>
+                        <span className="text-xs font-bold text-slate-800">
+                          Snap Back Side
+                        </span>
+                        <span className="text-[10px] text-slate-400 mt-0.5">
+                          Camera or browse file
+                        </span>
+                        <input
+                          type="file"
+                          accept="image/*"
+                          capture="environment"
+                          className="hidden"
+                          onChange={(e) => {
+                            const file = e.target.files?.[0];
+                            if (file) {
+                              const reader = new FileReader();
+                              reader.onload = (ev) => {
+                                setIdUpdateForm({
+                                  ...idUpdateForm,
+                                  id_image_back_file: file,
+                                  id_image_back_preview: ev.target.result,
+                                });
+                              };
+                              reader.readAsDataURL(file);
+                            }
+                          }}
+                        />
+                      </label>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Guest Details Edit */}
+              <div className="pt-2 border-t border-slate-100">
+                <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-3">
+                  Guest Identification Details
+                </h4>
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Guest Full Name
+                    </label>
+                    <input
+                      type="text"
+                      value={idUpdateForm.guest_name}
+                      onChange={(e) => setIdUpdateForm({ ...idUpdateForm, guest_name: e.target.value })}
+                      className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm outline-none focus:border-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      ID / Passport Number
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="e.g. EP987654"
+                      value={idUpdateForm.guest_id_number}
+                      onChange={(e) => setIdUpdateForm({ ...idUpdateForm, guest_id_number: e.target.value })}
+                      className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm outline-none focus:border-blue-500"
+                    />
+                  </div>
+                  <div className="sm:col-span-2">
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Guest Phone Number
+                    </label>
+                    <input
+                      type="text"
+                      value={idUpdateForm.guest_phone}
+                      onChange={(e) => setIdUpdateForm({ ...idUpdateForm, guest_phone: e.target.value })}
+                      className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm outline-none focus:border-blue-500"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Actions */}
+              <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setUpdateIdModalOpen(false)}
+                  className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-600 hover:bg-slate-50 transition"
+                  disabled={submittingIdUpdate}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={submittingIdUpdate}
+                  className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-6 py-2.5 text-sm font-bold text-white shadow-lg shadow-blue-500/20 hover:bg-blue-700 transition disabled:opacity-50"
+                >
+                  {submittingIdUpdate ? (
+                    <>
+                      <Loader2 size={16} className="animate-spin" />
+                      Saving...
+                    </>
+                  ) : (
+                    <>
+                      <Check size={16} />
+                      Save Check-In Updates
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ====================================================
+          MODAL: FULLSCREEN GUEST ID IMAGE VIEWER (FRONT & BACK)
+      ==================================================== */}
+      {idViewerModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-md">
+          <div className="relative max-w-3xl w-full rounded-3xl bg-slate-900 p-5 shadow-2xl text-center">
+            {/* Header */}
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800 text-white">
+              <span className="text-sm font-bold flex items-center gap-2">
+                <Camera size={16} className="text-blue-400" />
+                Guest Identification Document
+              </span>
+              <div className="flex items-center gap-2">
+                {((viewingSide === "front" ? viewingIdFrontUrl : viewingIdBackUrl) || viewingIdFrontUrl || viewingIdBackUrl) && (
+                  <a
+                    href={getFullImageUrl(viewingSide === "front" ? (viewingIdFrontUrl || viewingIdBackUrl) : (viewingIdBackUrl || viewingIdFrontUrl))}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="rounded-lg bg-slate-800 px-3 py-1.5 text-xs font-semibold text-slate-200 hover:bg-slate-700 transition"
+                  >
+                    Open Original
+                  </a>
+                )}
+                <button
+                  onClick={() => setIdViewerModalOpen(false)}
+                  className="rounded-full p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white transition"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+            </div>
+
+            {/* Toggle Tabs between Front and Back */}
+            <div className="mt-3 flex items-center justify-center gap-2">
+              <button
+                type="button"
+                onClick={() => setViewingSide("front")}
+                className={`inline-flex items-center gap-1.5 rounded-xl px-4 py-1.5 text-xs font-bold transition ${
+                  viewingSide === "front"
+                    ? "bg-blue-600 text-white shadow-md shadow-blue-500/20"
+                    : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+                }`}
+              >
+                Front Side {viewingIdFrontUrl ? "âœ“" : "(None)"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setViewingSide("back")}
+                className={`inline-flex items-center gap-1.5 rounded-xl px-4 py-1.5 text-xs font-bold transition ${
+                  viewingSide === "back"
+                    ? "bg-indigo-600 text-white shadow-md shadow-indigo-500/20"
+                    : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+                }`}
+              >
+                Back Side {viewingIdBackUrl ? "âœ“" : "(None)"}
+              </button>
+            </div>
+
+            {/* Main Image Display */}
+            <div className="py-4 flex items-center justify-center min-h-[300px]">
+              {(viewingSide === "front" ? viewingIdFrontUrl : viewingIdBackUrl) ? (
+                <img
+                  src={getFullImageUrl(viewingSide === "front" ? viewingIdFrontUrl : viewingIdBackUrl)}
+                  alt={`ID Document ${viewingSide === "front" ? "Front" : "Back"}`}
+                  className="max-h-[70vh] w-auto max-w-full rounded-2xl object-contain shadow-xl border border-slate-800"
+                />
+              ) : (
+                <div className="py-12 text-slate-500 text-sm">
+                  No {viewingSide === "front" ? "Front" : "Back"} ID photo uploaded for this reservation.
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    
+      {/* Amend Room Price Modal for Special Guests */}
+      <AmendRoomPriceModal
+        isOpen={amendPriceModalOpen}
+        onClose={() => {
+          setAmendPriceModalOpen(false);
+          setSelectedAmendRes(null);
+        }}
+        reservation={selectedAmendRes}
+        onSuccess={handleAmendPriceSuccess}
+      />
+    </div>
+  );
+}

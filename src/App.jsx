@@ -1,53 +1,49 @@
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
-import { AuthProvider, useAuth } from './context/AuthContext';
-import LoginPage from './pages/LoginPage';
-import DashboardPage from './pages/DashboardPage';
-import ReservationsPage from './pages/ReservationsPage';
-import RoomsPage from './pages/RoomsPage';
-import DashboardLayout from './components/DashboardLayout';
+﻿import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { AuthProvider, useAuth } from "./context/AuthContext";
+import LoginPage from "./pages/LoginPage";
+import FrontDeskLayout from "./layouts/FrontDeskLayout";
+import FrontDeskPage from "./modules/frontdesk/pages/FrontDeskPage";
+import ReservationsListPage from "./modules/frontdesk/pages/ReservationsListPage";
+import ReservationHistoryPage from "./modules/frontdesk/pages/ReservationHistoryPage";
+import RoomManagementPage from "./modules/frontdesk/pages/RoomManagementPage";
+import FrontDeskReportsPage from "./modules/frontdesk/pages/FrontDeskReportsPage";
 
 function PrivateRoute({ children }) {
   const { user, loading } = useAuth();
   if (loading) {
     return (
-      <div className="min-h-screen bg-slate-950 flex items-center justify-center">
-        <div className="text-slate-400">Loading...</div>
+      <div className="min-h-screen bg-slate-900 flex items-center justify-center text-white text-sm">
+        Loading...
       </div>
     );
   }
   return user ? children : <Navigate to="/login" replace />;
 }
 
-function AppRoutes() {
-  const { user } = useAuth();
-  return (
-    <Routes>
-      <Route path="/login" element={user ? <Navigate to="/dashboard" replace /> : <LoginPage />} />
-      <Route path="/dashboard" element={
-        <PrivateRoute>
-          <DashboardLayout><DashboardPage /></DashboardLayout>
-        </PrivateRoute>
-      } />
-      <Route path="/reservations" element={
-        <PrivateRoute>
-          <DashboardLayout><ReservationsPage /></DashboardLayout>
-        </PrivateRoute>
-      } />
-      <Route path="/rooms" element={
-        <PrivateRoute>
-          <DashboardLayout><RoomsPage /></DashboardLayout>
-        </PrivateRoute>
-      } />
-      <Route path="*" element={<Navigate to="/dashboard" replace />} />
-    </Routes>
-  );
-}
-
 export default function App() {
   return (
     <BrowserRouter>
       <AuthProvider>
-        <AppRoutes />
+        <Routes>
+          <Route path="/login" element={<LoginPage />} />
+          
+          <Route
+            path="/frontdesk"
+            element={
+              <PrivateRoute>
+                <FrontDeskLayout />
+              </PrivateRoute>
+            }
+          >
+            <Route index element={<FrontDeskPage />} />
+            <Route path="reservations" element={<ReservationsListPage />} />
+            <Route path="history" element={<ReservationHistoryPage />} />
+            <Route path="rooms" element={<RoomManagementPage />} />
+            <Route path="reports" element={<FrontDeskReportsPage />} />
+          </Route>
+
+          <Route path="*" element={<Navigate to="/frontdesk" replace />} />
+        </Routes>
       </AuthProvider>
     </BrowserRouter>
   );

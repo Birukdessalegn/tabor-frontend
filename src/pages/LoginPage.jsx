@@ -1,93 +1,105 @@
-import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { useAuth } from '../context/AuthContext';
+﻿import { useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { useAuth } from "../context/AuthContext";
+import { Lock, User, AlertCircle } from "lucide-react";
 
 export default function LoginPage() {
   const { login } = useAuth();
   const navigate = useNavigate();
-  const [form, setForm] = useState({ username: '', password: '' });
-  const [error, setError] = useState('');
+  const [form, setForm] = useState({ username: "", password: "" });
+  const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
   async function handleSubmit(e) {
     e.preventDefault();
-    setError('');
+    setError("");
     setLoading(true);
     try {
       await login(form.username, form.password);
-      navigate('/dashboard');
+      navigate("/frontdesk");
     } catch (err) {
-      setError(err.response?.data?.message || 'Login failed. Check credentials.');
+      setError(err.message || "Login failed. Check credentials.");
     } finally {
       setLoading(false);
     }
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-blue-950 to-slate-900 flex items-center justify-center p-4">
+    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-950 to-slate-900 flex items-center justify-center p-4">
       <div className="w-full max-w-md">
-        {/* Logo */}
+        {/* Brand */}
         <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-20 h-20 rounded-2xl bg-blue-600 shadow-lg mb-4">
-            <span className="text-4xl">🏨</span>
+          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-amber-500 text-slate-950 font-bold text-2xl shadow-xl shadow-amber-500/20 mb-3">
+            TH
           </div>
-          <h1 className="text-3xl font-bold text-white tracking-wide">Tabor Hotel</h1>
-          <p className="text-blue-300 mt-1 text-sm">Room Reservation System</p>
+          <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-wide">
+            TABOR HOTEL
+          </h1>
+          <p className="text-amber-400 mt-1 text-xs font-semibold uppercase tracking-wider">
+            Room Reservation & Front Desk
+          </p>
         </div>
 
         {/* Card */}
-        <div className="bg-white/5 backdrop-blur border border-white/10 rounded-2xl p-8 shadow-2xl">
-          <h2 className="text-xl font-semibold text-white mb-6">Sign In</h2>
+        <div className="bg-slate-900/90 backdrop-blur border border-slate-800 rounded-2xl p-6 sm:p-8 shadow-2xl">
+          <h2 className="text-lg font-bold text-white mb-5">Sign In</h2>
 
           {error && (
-            <div className="mb-4 p-3 bg-red-500/20 border border-red-500/40 rounded-lg text-red-300 text-sm">
-              {error}
+            <div className="mb-4 p-3 bg-rose-500/10 border border-rose-500/30 rounded-xl text-rose-300 text-xs font-medium flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
+              <span>{error}</span>
             </div>
           )}
 
           <form onSubmit={handleSubmit} className="space-y-4">
             <div>
-              <label className="block text-sm text-blue-200 mb-1.5">Username or Email</label>
-              <input
-                type="text"
-                value={form.username}
-                onChange={(e) => setForm({ ...form, username: e.target.value })}
-                className="w-full bg-white/10 border border-white/20 rounded-lg px-4 py-2.5 text-white placeholder-white/40 focus:outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 transition"
-                placeholder="Enter username"
-                required
-              />
+              <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+                Username or Email
+              </label>
+              <div className="relative">
+                <input
+                  type="text"
+                  value={form.username}
+                  onChange={(e) => setForm({ ...form, username: e.target.value })}
+                  className="w-full bg-slate-800 border border-slate-700 rounded-xl pl-10 pr-4 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:border-amber-500 text-sm"
+                  placeholder="Enter username"
+                  required
+                />
+                <User className="w-4 h-4 text-slate-400 absolute left-3.5 top-3" />
+              </div>
             </div>
+
             <div>
-              <label className="block text-sm text-blue-200 mb-1.5">Password</label>
-              <input
-                type="password"
-                value={form.password}
-                onChange={(e) => setForm({ ...form, password: e.target.value })}
-                className="w-full bg-white/10 border border-white/20 rounded-lg px-4 py-2.5 text-white placeholder-white/40 focus:outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 transition"
-                placeholder="Enter password"
-                required
-              />
+              <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+                Password
+              </label>
+              <div className="relative">
+                <input
+                  type="password"
+                  value={form.password}
+                  onChange={(e) => setForm({ ...form, password: e.target.value })}
+                  className="w-full bg-slate-800 border border-slate-700 rounded-xl pl-10 pr-4 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:border-amber-500 text-sm"
+                  placeholder="Enter password"
+                  required
+                />
+                <Lock className="w-4 h-4 text-slate-400 absolute left-3.5 top-3" />
+              </div>
             </div>
+
             <button
               type="submit"
               disabled={loading}
-              className="w-full py-3 bg-blue-600 hover:bg-blue-500 disabled:bg-blue-800 text-white font-semibold rounded-lg transition mt-2 flex items-center justify-center gap-2"
+              className="w-full py-3 bg-amber-500 hover:bg-amber-400 disabled:bg-amber-600/50 text-slate-950 font-bold rounded-xl transition mt-2 shadow-lg shadow-amber-500/20 text-sm flex items-center justify-center gap-2"
             >
-              {loading ? (
-                <>
-                  <span className="animate-spin text-lg">⏳</span>
-                  Signing in...
-                </>
-              ) : (
-                'Sign In'
-              )}
+              {loading ? "Signing in..." : "Sign In to Front Desk"}
             </button>
           </form>
         </div>
 
-        <p className="text-center text-white/30 text-xs mt-6">Tabor Hotel Management System v1.0</p>
+        <p className="text-center text-slate-500 text-xs mt-6">
+          Tabor Hotel Management System v1.0
+        </p>
       </div>
     </div>
   );
 }
-

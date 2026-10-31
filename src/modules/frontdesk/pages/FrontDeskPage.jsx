@@ -1,0 +1,3180 @@
+import { useState, useEffect, useMemo } from "react";
+import AmendRoomPriceModal from "../components/AmendRoomPriceModal";
+import {
+  BedDouble,
+  DoorClosed,
+  CalendarCheck,
+  CalendarDays,
+  Plus,
+  Search,
+  CheckCircle2,
+  XCircle,
+  Clock,
+  Wrench,
+  Sparkles,
+  CreditCard,
+  Phone,
+  User,
+  Users,
+  X,
+  FileText,
+  Printer,
+  ChevronRight,
+  Filter,
+  DollarSign,
+  AlertCircle,
+  AlertTriangle,
+  Camera,
+  Upload,
+  Eye,
+  Check,
+  Loader2,
+  Crown,
+  Lock,
+  Image as ImageIcon,
+  Tag
+} from "lucide-react";
+import {
+  getRooms,
+  getRoomTypes,
+  getRoomStats,
+  getReservation,
+  createReservation,
+  updateReservation,
+  uploadGuestIdImage,
+  uploadStandaloneGuestId,
+  checkInReservation,
+  checkOutReservation,
+  addReservationPayment,
+  cancelReservation,
+  updateRoomStatus,
+  amendReservationPrice
+} from "../services/frontdeskApi";
+
+const STATUS_CONFIG = {
+  available: {
+    label: "Available",
+    badge: "bg-emerald-50 text-emerald-700 border-emerald-200",
+    dot: "bg-emerald-500",
+    border: "border-emerald-200 hover:border-emerald-400",
+    bg: "bg-emerald-50/30",
+  },
+  occupied: {
+    label: "Occupied",
+    badge: "bg-rose-50 text-rose-700 border-rose-200",
+    dot: "bg-rose-500",
+    border: "border-rose-200 hover:border-rose-400",
+    bg: "bg-rose-50/30",
+  },
+  reserved: {
+    label: "Reserved",
+    badge: "bg-amber-50 text-amber-700 border-amber-200",
+    dot: "bg-amber-500",
+    border: "border-amber-200 hover:border-amber-400",
+    bg: "bg-amber-50/30",
+  },
+  cleaning: {
+    label: "Cleaning",
+    badge: "bg-sky-50 text-sky-700 border-sky-200",
+    dot: "bg-sky-500",
+    border: "border-sky-200 hover:border-sky-400",
+    bg: "bg-sky-50/30",
+  },
+  maintenance: {
+    label: "Maintenance",
+    badge: "bg-slate-100 text-slate-700 border-slate-300",
+    dot: "bg-slate-500",
+    border: "border-slate-200 hover:border-slate-400",
+    bg: "bg-slate-50",
+  },
+};
+
+// 12:00 PM Hotel Room Leave / Departure Status (Pure Helper - Hoisted)
+function getRoomDepartureStatus(room) {
+  if (!room || room.status !== "occupied") return null;
+  const checkOutRaw = String(room.check_out_date || "").split("T")[0];
+  if (!checkOutRaw) return null;
+
+  const parts = checkOutRaw.split("-").map(Number);
+  if (parts.length !== 3 || parts.some(isNaN)) return null;
+  const [y, m, d] = parts;
+
+  const now = new Date();
+  const currentHour = now.getHours();
+  const currentMinute = now.getMinutes();
+
+  const checkOutDate = new Date(Date.UTC(y, m - 1, d));
+  const todayUTC = new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()));
+  const diffDays = Math.round((checkOutDate.getTime() - todayUTC.getTime()) / 86400000);
+
+  if (diffDays === 0) {
+    // Due today! Hotel leave time is 12:00 PM
+    const isPastNoon = currentHour > 12 || (currentHour === 12 && currentMinute >= 0);
+    if (isPastNoon) {
+      return {
+        severity: "overdue_leave",
+        isOverdue: true,
+        badgeText: "Leave Time Arrived (Past 12:00 PM)",
+        shortBadge: "Leave Now (12PM)",
+        message: "Room leave time has arrived! Check-out was scheduled for 12:00 PM today.",
+        checkOutDate: checkOutRaw,
+        diffDays: 0,
+      };
+    } else {
+      return {
+        severity: "leave_today",
+        isOverdue: false,
+        badgeText: "Leave Today by 12:00 PM",
+        shortBadge: "Due 12:00 PM",
+        message: "Guest scheduled to vacate room today by 12:00 PM.",
+        checkOutDate: checkOutRaw,
+        diffDays: 0,
+      };
+    }
+  } else if (diffDays < 0) {
+    const daysPast = Math.abs(diffDays);
+    return {
+      severity: "overdue_leave",
+      isOverdue: true,
+      badgeText: `Overdue Departure (${daysPast}d past 12:00 PM)`,
+      shortBadge: `Overdue ${daysPast}d`,
+      message: `Check-out date was ${daysPast} day(s) ago! Room leave time has passed.`,
+      checkOutDate: checkOutRaw,
+      diffDays,
+    };
+  } else if (diffDays === 1) {
+    return {
+      severity: "leave_tomorrow",
+      isOverdue: false,
+      badgeText: "Leaving Tomorrow 12:00 PM",
+      shortBadge: "Tomorrow 12PM",
+      message: "Check-out scheduled for tomorrow at 12:00 PM.",
+      checkOutDate: checkOutRaw,
+      diffDays: 1,
+    };
+  }
+
+  return null;
+}
+
+
+export default function FrontDeskPage() {
+  // Special Guest Price Amendment
+  const [amendPriceModalOpen, setAmendPriceModalOpen] = useState(false);
+  const [selectedAmendRoom, setSelectedAmendRoom] = useState(null);
+
+  const handleOpenAmendPrice = (room) => {
+    if (!room.current_reservation_id) {
+      showToast("No active reservation found on this room", "error");
+      return;
+    }
+    const totalNights = Number(room.total_nights || 1);
+    const totalAmount = Number(room.total_amount || 0);
+    const ratePerNight = Number(room.rate_per_night) > 0 
+      ? Number(room.rate_per_night) 
+      : (totalNights > 0 && totalAmount > 0 ? totalAmount / totalNights : Number(room.price || 0));
+
+    setSelectedAmendRoom({
+      id: room.current_reservation_id,
+      room_number: room.room_number,
+      room_type_name: room.type_name,
+      guest_name: room.guest_name,
+      rate_per_night: ratePerNight,
+      total_nights: totalNights,
+      total_amount: totalAmount > 0 ? totalAmount : ratePerNight * totalNights,
+    });
+    setAmendPriceModalOpen(true);
+  };
+
+  const handleAmendPriceSuccess = async ({ reservationId, rate_per_night, reason }) => {
+    const res = await amendReservationPrice(reservationId, { rate_per_night, reason });
+    showToast(res.message || "Room price amended successfully and notification dispatched to Admin & Finance.");
+    loadData();
+  };
+
+  const [rooms, setRooms] = useState([]);
+  const [roomTypes, setRoomTypes] = useState([]);
+  const [stats, setStats] = useState({ total: 0, available: 0, occupied: 0, reserved: 0, cleaning: 0, maintenance: 0, occupancyRate: 0 });
+  const [loading, setLoading] = useState(true);
+
+  // Filters
+  const [selectedStatus, setSelectedStatus] = useState("all");
+  const [selectedFloor, setSelectedFloor] = useState("all");
+  const [selectedType, setSelectedType] = useState("all");
+  const [searchQuery, setSearchQuery] = useState("");
+
+  // Modals
+  const [bookingModalOpen, setBookingModalOpen] = useState(false);
+  const [bookingType, setBookingType] = useState("walkin"); // 'walkin' | 'reservation'
+  const [selectedRoom, setSelectedRoom] = useState(null);
+
+  const [checkoutModalOpen, setCheckoutModalOpen] = useState(false);
+  const [activeReservation, setActiveReservation] = useState(null);
+
+  const [paymentModalOpen, setPaymentModalOpen] = useState(false);
+  const [selectedPaymentRoom, setSelectedPaymentRoom] = useState(null);
+  const [submittingPayment, setSubmittingPayment] = useState(false);
+  const [paymentForm, setPaymentForm] = useState({
+    amount: "",
+    payment_method: "cash",
+    transaction_reference: "",
+    notes: "",
+    receipt_image: null,
+  });
+
+  // Update Check-In / Guest ID Modal (Mobile Friendly)
+  const [updateIdModalOpen, setUpdateIdModalOpen] = useState(false);
+  const [selectedResForUpdate, setSelectedResForUpdate] = useState(null);
+  const [idUpdateForm, setIdUpdateForm] = useState({
+    guest_name: "",
+    guest_id_number: "",
+    guest_phone: "",
+    special_requests: "",
+    id_image_file: null,
+    id_image_preview: null,
+    existing_id_image_url: "",
+    id_image_back_file: null,
+    id_image_back_preview: null,
+    existing_id_image_back_url: "",
+  });
+  const [submittingIdUpdate, setSubmittingIdUpdate] = useState(false);
+
+  // Fullscreen ID Image Viewer Modal (Supports Front & Back)
+  const [idViewerModalOpen, setIdViewerModalOpen] = useState(false);
+  const [viewingIdFrontUrl, setViewingIdFrontUrl] = useState("");
+  const [viewingIdBackUrl, setViewingIdBackUrl] = useState("");
+  const [viewingSide, setViewingSide] = useState("front");
+
+  // Reserved Room Details Popup Modal
+  const [reservedDetailsModalOpen, setReservedDetailsModalOpen] = useState(false);
+  const [selectedReservedRoom, setSelectedReservedRoom] = useState(null);
+  const [selectedReservationDetails, setSelectedReservationDetails] = useState(null);
+  const [loadingResDetails, setLoadingResDetails] = useState(false);
+
+  const [toast, setToast] = useState(null);
+
+  // Helper to build full backend image URL
+  const getFullImageUrl = (rawImage) => {
+    if (!rawImage) return "";
+    if (
+      rawImage.startsWith("data:") ||
+      rawImage.startsWith("http://") ||
+      rawImage.startsWith("https://")
+    ) {
+      return rawImage;
+    }
+    const backendBase =
+      import.meta.env.VITE_API_URL?.replace(/\/api\/?$/, "") ||
+      "http://localhost:5000";
+    const cleanPath = rawImage.startsWith("/") ? rawImage : `/${rawImage}`;
+    return `${backendBase}${cleanPath}`;
+  };
+
+  // Booking Form State
+  const today = new Date().toISOString().split("T")[0];
+  const tomorrow = new Date(Date.now() + 86400000).toISOString().split("T")[0];
+
+  const [bookingForm, setBookingForm] = useState({
+    guest_name: "",
+    guest_phone: "",
+    guest_email: "",
+    guest_id_number: "",
+    id_image_file: null,
+    id_image_preview: null,
+    id_image_back_file: null,
+    id_image_back_preview: null,
+    room_id: "",
+    check_in_date: today,
+    check_out_date: tomorrow,
+    adults: 1,
+    children: 0,
+    rate_per_night: "",
+    initial_payment: "",
+    payment_method: "cash",
+    transaction_reference: "",
+    special_requests: "",
+  });
+
+  
+
+  const showToast = (message, type = "success") => {
+    setToast({ message, type });
+    setTimeout(() => setToast(null), 3500);
+  };
+
+  const loadData = async () => {
+    try {
+      setLoading(true);
+      const [roomsRes, typesRes, statsRes] = await Promise.all([
+        getRooms(),
+        getRoomTypes(),
+        getRoomStats().catch(() => ({ data: {} })),
+      ]);
+      setRooms(roomsRes.data || []);
+      setRoomTypes(typesRes.data || []);
+      setStats(statsRes.data || {});
+      
+    } catch (err) {
+      showToast(err.message || "Failed to load data", "error");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadData();
+  }, []);
+
+
+
+  // Compute available floors
+  const floors = useMemo(() => {
+    const uniqueFloors = [...new Set(rooms.map((r) => r.floor))].sort((a, b) => a - b);
+    return uniqueFloors;
+  }, [rooms]);
+
+  // Filtered rooms
+  const filteredRooms = useMemo(() => {
+    return rooms.filter((r) => {
+      if (selectedStatus !== "all") {
+        if (selectedStatus === "departures") {
+          const dep = getRoomDepartureStatus(r);
+          if (!dep || (dep.severity !== "overdue_leave" && dep.severity !== "leave_today")) return false;
+        } else if (r.status !== selectedStatus) {
+          return false;
+        }
+      }
+      if (selectedFloor !== "all" && String(r.floor) !== String(selectedFloor)) return false;
+      if (selectedType !== "all" && String(r.room_type_id) !== String(selectedType)) return false;
+      if (searchQuery.trim()) {
+        const q = searchQuery.toLowerCase();
+        const matchesNum = r.room_number.toLowerCase().includes(q);
+        const matchesGuest = r.guest_name && r.guest_name.toLowerCase().includes(q);
+        const matchesType = r.type_name && r.type_name.toLowerCase().includes(q);
+        if (!matchesNum && !matchesGuest && !matchesType) return false;
+      }
+      return true;
+    });
+  }, [rooms, selectedStatus, selectedFloor, selectedType, searchQuery]);
+
+  // Handle open booking modal
+  const handleOpenBooking = (room = null, type = "walkin") => {
+    setSelectedRoom(room);
+    setBookingType(type);
+    
+    const selectedTypeId = room ? room.room_type_id : (roomTypes[0]?.id || "");
+    const matchingType = roomTypes.find((t) => t.id === selectedTypeId);
+    const baseRate = room ? room.base_rate : (matchingType?.base_rate || "");
+
+    setBookingForm({
+      guest_name: "",
+      guest_phone: "",
+      guest_email: "",
+      guest_id_number: "",
+      id_image_file: null,
+      id_image_preview: null,
+      id_image_back_file: null,
+      id_image_back_preview: null,
+      room_id: room ? String(room.id) : "",
+      check_in_date: today,
+      check_out_date: tomorrow,
+      adults: 1,
+      children: 0,
+      rate_per_night: baseRate ? String(baseRate) : "",
+      initial_payment: "",
+      payment_method: "cash",
+      transaction_reference: "",
+      special_requests: "",
+    });
+    setBookingModalOpen(true);
+  };
+
+  // Open Reserved Room Details Popup Modal
+  const handleOpenReservedDetails = async (room) => {
+    setSelectedReservedRoom(room);
+    setSelectedReservationDetails(null);
+    setReservedDetailsModalOpen(true);
+    if (room.current_reservation_id) {
+      try {
+        setLoadingResDetails(true);
+        const res = await getReservation(room.current_reservation_id).catch(() => null);
+        if (res?.data || res?.reservation) {
+          setSelectedReservationDetails(res.data || res.reservation);
+        } else {
+          setSelectedReservationDetails(null);
+        }
+      } catch {
+        setSelectedReservationDetails(null);
+      } finally {
+        setLoadingResDetails(false);
+      }
+    }
+  };
+
+  // Open Update ID Modal (Front & Back)
+  const handleOpenUpdateIdModal = (room) => {
+    setSelectedResForUpdate(room);
+    setIdUpdateForm({
+      guest_name: room.guest_name || "",
+      guest_id_number: room.guest_id_number || "",
+      guest_phone: room.guest_phone || "",
+      special_requests: room.special_requests || "",
+      id_image_file: null,
+      id_image_preview: null,
+      existing_id_image_url: room.id_image_url || "",
+      id_image_back_file: null,
+      id_image_back_preview: null,
+      existing_id_image_back_url: room.id_image_back_url || "",
+    });
+    setUpdateIdModalOpen(true);
+  };
+
+  // Submit Update ID Modal (Front & Back)
+  const handleSaveIdUpdate = async (e) => {
+    e.preventDefault();
+    if (!selectedResForUpdate?.current_reservation_id) {
+      showToast("No active reservation to update", "error");
+      return;
+    }
+
+    try {
+      setSubmittingIdUpdate(true);
+      const resId = selectedResForUpdate.current_reservation_id;
+
+      // 1. If image files were taken/selected, upload them
+      let uploadedFrontUrl = null;
+      let uploadedBackUrl = null;
+      if (idUpdateForm.id_image_file || idUpdateForm.id_image_back_file) {
+        try {
+          const sRes = await uploadStandaloneGuestId(
+            idUpdateForm.id_image_file,
+            idUpdateForm.id_image_back_file
+          );
+          uploadedFrontUrl = sRes.imageUrl || sRes.frontImageUrl;
+          uploadedBackUrl = sRes.backImageUrl;
+        } catch (sErr) {
+          console.warn("Standalone upload failed, trying endpoint:", sErr);
+          try {
+            const uploadRes = await uploadGuestIdImage(
+              resId,
+              idUpdateForm.id_image_file,
+              idUpdateForm.id_image_back_file
+            );
+            uploadedFrontUrl = uploadRes.imageUrl || uploadRes.data?.id_image_url;
+            uploadedBackUrl = uploadRes.backImageUrl || uploadRes.data?.id_image_back_url;
+          } catch (uploadErr) {
+            console.warn("Fallback multipart upload failed:", uploadErr);
+          }
+        }
+      }
+
+      // 2. Update reservation details
+      const updatePayload = {
+        guest_name: idUpdateForm.guest_name,
+        guest_id_number: idUpdateForm.guest_id_number,
+        guest_phone: idUpdateForm.guest_phone,
+        special_requests: idUpdateForm.special_requests,
+        ...(uploadedFrontUrl
+          ? { id_image_url: uploadedFrontUrl }
+          : idUpdateForm.id_image_preview
+          ? { id_image_url: idUpdateForm.id_image_preview }
+          : {}),
+        ...(uploadedBackUrl
+          ? { id_image_back_url: uploadedBackUrl }
+          : idUpdateForm.id_image_back_preview
+          ? { id_image_back_url: idUpdateForm.id_image_back_preview }
+          : {}),
+      };
+
+      try {
+        await updateReservation(resId, updatePayload);
+      } catch (updateErr) {
+        if (updateErr.message && updateErr.message.includes("id_image_back_url")) {
+          const { id_image_back_url, ...fallbackPayload } = updatePayload;
+          await updateReservation(resId, fallbackPayload);
+        } else {
+          throw updateErr;
+        }
+      }
+
+      showToast("Check-In details and Guest ID updated successfully!");
+      setUpdateIdModalOpen(false);
+      loadData();
+    } catch (err) {
+      showToast(err.message || "Failed to update check-in", "error");
+    } finally {
+      setSubmittingIdUpdate(false);
+    }
+  };
+
+  // View Full ID Image (Front & Back)
+  const handleViewIdImage = (frontUrl, backUrl = "") => {
+    setViewingIdFrontUrl(frontUrl || "");
+    setViewingIdBackUrl(backUrl || "");
+    setViewingSide(frontUrl ? "front" : (backUrl ? "back" : "front"));
+    setIdViewerModalOpen(true);
+  };
+
+  // Handle change in booking form dates/room to calculate total
+  const calculatedNights = useMemo(() => {
+    if (!bookingForm.check_in_date || !bookingForm.check_out_date) return 1;
+    const d1 = new Date(bookingForm.check_in_date);
+    const d2 = new Date(bookingForm.check_out_date);
+    const diff = Math.ceil((d2 - d1) / (1000 * 60 * 60 * 24));
+    return diff > 0 ? diff : 1;
+  }, [bookingForm.check_in_date, bookingForm.check_out_date]);
+
+  const calculatedTotal = useMemo(() => {
+    const rate = Number(bookingForm.rate_per_night) || 0;
+    return rate * calculatedNights;
+  }, [bookingForm.rate_per_night, calculatedNights]);
+
+  // Submit booking (Walk-in or New Reservation)
+  const handleSubmitBooking = async (e) => {
+    e.preventDefault();
+    if (!bookingForm.room_id) {
+      showToast("Please select a room", "error");
+      return;
+    }
+    if (!bookingForm.guest_name.trim()) {
+      showToast("Guest name is required", "error");
+      return;
+    }
+
+    try {
+      let uploadedFrontUrl = null;
+      let uploadedBackUrl = null;
+      if (bookingForm.id_image_file || bookingForm.id_image_back_file) {
+        try {
+          const upRes = await uploadStandaloneGuestId(
+            bookingForm.id_image_file,
+            bookingForm.id_image_back_file
+          );
+          uploadedFrontUrl = upRes.imageUrl || upRes.frontImageUrl;
+          uploadedBackUrl = upRes.backImageUrl;
+        } catch (uploadErr) {
+          console.warn("Pre-upload standalone failed, will fallback:", uploadErr);
+        }
+      }
+
+      const {
+        id_image_file,
+        id_image_preview,
+        id_image_back_file,
+        id_image_back_preview,
+        ...cleanBookingForm
+      } = bookingForm;
+
+      const createPayload = {
+        ...cleanBookingForm,
+        id_image_url: uploadedFrontUrl || (id_image_preview ? id_image_preview : null),
+        id_image_back_url: uploadedBackUrl || (id_image_back_preview ? id_image_back_preview : null),
+        is_walkin: bookingType === "walkin",
+      };
+
+      let created;
+      try {
+        created = await createReservation(createPayload);
+      } catch (createErr) {
+        if (createErr.message && createErr.message.includes("id_image_back_url")) {
+          const { id_image_back_url, ...fallbackPayload } = createPayload;
+          created = await createReservation(fallbackPayload);
+        } else {
+          throw createErr;
+        }
+      }
+
+      const resId = created?.data?.id;
+      if (
+        resId &&
+        (bookingForm.id_image_file || bookingForm.id_image_back_file) &&
+        (!uploadedFrontUrl && !uploadedBackUrl)
+      ) {
+        try {
+          await uploadGuestIdImage(
+            resId,
+            bookingForm.id_image_file,
+            bookingForm.id_image_back_file
+          );
+        } catch (uploadErr) {
+          console.warn("ID image upload warning:", uploadErr);
+        }
+      }
+
+      showToast(
+        bookingType === "walkin"
+          ? "Guest checked in successfully!"
+          : "Reservation confirmed successfully!"
+      );
+      setBookingModalOpen(false);
+      setBookingForm({
+        guest_name: "",
+        guest_phone: "",
+        guest_email: "",
+        guest_id_number: "",
+        id_image_file: null,
+        id_image_preview: null,
+        id_image_back_file: null,
+        id_image_back_preview: null,
+        room_id: "",
+        check_in_date: today,
+        check_out_date: tomorrow,
+        adults: 1,
+        children: 0,
+        rate_per_night: "",
+        initial_payment: "",
+        payment_method: "cash",
+        transaction_reference: "",
+        special_requests: "",
+      });
+      loadData();
+    } catch (err) {
+      showToast(err.message || "Failed to create booking", "error");
+    }
+  };
+
+  // Handle quick room status update (e.g. cleaning -> available)
+  const handleStatusChange = async (roomId, newStatus) => {
+    try {
+      await updateRoomStatus(roomId, newStatus);
+      showToast(`Room marked as ${newStatus}`);
+      loadData();
+    } catch (err) {
+      showToast(err.message || "Failed to update room status", "error");
+    }
+  };
+
+  // Open Checkout Modal
+  const handleOpenCheckout = (room) => {
+    if (!room.current_reservation_id) {
+      showToast("No active reservation found on this room", "error");
+      return;
+    }
+    setSelectedRoom(room);
+    const balance = Number(room.total_amount || 0) - Number(room.paid_amount || 0);
+    setActiveReservation({
+      id: room.current_reservation_id,
+      room_number: room.room_number,
+      guest_name: room.guest_name,
+      check_in_date: room.check_in_date,
+      check_out_date: room.check_out_date,
+      total_amount: Number(room.total_amount || 0),
+      paid_amount: Number(room.paid_amount || 0),
+      balance_due: balance > 0 ? balance : 0,
+      payment_amount: balance > 0 ? balance : 0,
+      payment_method: "cash",
+      notes: "",
+    });
+    setCheckoutModalOpen(true);
+  };
+
+  // Submit Checkout
+  const handleConfirmCheckout = async (e) => {
+    e.preventDefault();
+    try {
+      await checkOutReservation(activeReservation.id, {
+        payment_amount: activeReservation.payment_amount,
+        payment_method: activeReservation.payment_method,
+        notes: activeReservation.notes,
+      });
+      showToast(`Room ${activeReservation.room_number} checked out successfully!`);
+      setCheckoutModalOpen(false);
+      loadData();
+    } catch (err) {
+      showToast(err.message || "Failed to check out", "error");
+    }
+  };
+
+  // ============================================================
+  // PAYMENT COVERAGE & UNPAID STAY DAYS WARNING LOGIC
+  // ============================================================
+  const getRoomPaymentAlert = (room) => {
+    if (!room) return null;
+    if (room.status !== "occupied" && room.status !== "reserved") return null;
+    if (!room.current_reservation_id) return null;
+
+    const totalAmt = Number(room.total_amount || 0);
+    const paidAmt = Number(room.paid_amount || 0);
+    const balance = Math.max(0, totalAmt - paidAmt);
+
+    // If zero balance or marked paid and paidAmt >= totalAmt
+    if (balance <= 0 || (room.payment_status === "paid" && paidAmt >= totalAmt)) return null;
+
+    const totalNights = Math.max(1, Number(room.total_nights || 1));
+    let nightlyRate = Number(room.rate_per_night || room.base_rate || 0);
+    if (nightlyRate <= 0 && totalNights > 0 && totalAmt > 0) {
+      nightlyRate = totalAmt / totalNights;
+    }
+    if (nightlyRate <= 0) return null;
+
+    const paidNights = Math.floor(paidAmt / nightlyRate);
+    const unpaidNights = Math.max(0, totalNights - paidNights);
+
+    const checkInRaw = String(room.check_in_date || "").split("T")[0];
+    if (!checkInRaw) return null;
+    const parts = checkInRaw.split("-").map(Number);
+    if (parts.length !== 3 || parts.some(isNaN)) return null;
+    const [y, m, d] = parts;
+
+    // Check-in date in UTC
+    const checkInDate = new Date(Date.UTC(y, m - 1, d));
+    const paidThroughDate = new Date(checkInDate.getTime() + paidNights * 86400000);
+    const paidThroughStr = paidThroughDate.toISOString().split("T")[0];
+
+    const now = new Date();
+    const todayUTC = new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()));
+    const diffDays = Math.round((paidThroughDate.getTime() - todayUTC.getTime()) / 86400000);
+
+    if (diffDays < 0) {
+      const daysOverdue = Math.abs(diffDays);
+      return {
+        severity: "expired",
+        diffDays,
+        paidThroughStr,
+        paidNights,
+        unpaidNights,
+        nightlyRate,
+        balance,
+        paidAmt,
+        totalAmt,
+        message: `Payment Expired! Covered ${paidNights} night(s) to ${paidThroughStr} (${daysOverdue} ${daysOverdue === 1 ? 'day' : 'days'} overdue). Remaining ${unpaidNights} night(s) unpaid (${balance.toLocaleString()} ETB).`,
+        badgeText: `Expired (${daysOverdue}d ago)`,
+      };
+    } else if (diffDays === 0) {
+      return {
+        severity: "due_today",
+        diffDays,
+        paidThroughStr,
+        paidNights,
+        unpaidNights,
+        nightlyRate,
+        balance,
+        paidAmt,
+        totalAmt,
+        message: `Payment expires TODAY! Covered through ${paidThroughStr}. Remind guest to pay for remaining ${unpaidNights} night(s) (${balance.toLocaleString()} ETB).`,
+        badgeText: `Expires Today`,
+      };
+    } else if (diffDays === 1) {
+      return {
+        severity: "due_tomorrow",
+        diffDays,
+        paidThroughStr,
+        paidNights,
+        unpaidNights,
+        nightlyRate,
+        balance,
+        paidAmt,
+        totalAmt,
+        message: `Payment due tomorrow (${paidThroughStr}). Covered for ${paidNights} night(s). Remind guest to settle next ${unpaidNights} night(s) (${balance.toLocaleString()} ETB).`,
+        badgeText: `Due Tomorrow`,
+      };
+    } else {
+      return {
+        severity: "partial",
+        diffDays,
+        paidThroughStr,
+        paidNights,
+        unpaidNights,
+        nightlyRate,
+        balance,
+        paidAmt,
+        totalAmt,
+        message: `Partially paid: Covered through ${paidThroughStr} (${paidNights} nights). Remaining ${unpaidNights} night(s) (${balance.toLocaleString()} ETB) due on ${paidThroughStr}.`,
+        badgeText: `Paid thru ${paidThroughStr}`,
+      };
+    }
+  };
+
+  // Rooms that have payment expired, due today, or due tomorrow
+  const unpaidAlertRooms = useMemo(() => {
+    return rooms.filter((r) => {
+      if (r.status !== "occupied" && r.status !== "reserved") return false;
+      const alert = getRoomPaymentAlert(r);
+      return alert && (alert.severity === "expired" || alert.severity === "due_today" || alert.severity === "due_tomorrow");
+    });
+  }, [rooms]);
+
+  // getRoomDepartureStatus moved to top-level helper
+
+  // Rooms that must be vacated today or are overdue past 12:00 PM
+  const departureAlertRooms = useMemo(() => {
+    return rooms
+      .filter((r) => {
+        if (r.status !== "occupied") return false;
+        const dep = getRoomDepartureStatus(r);
+        return dep && (dep.severity === "overdue_leave" || dep.severity === "leave_today");
+      })
+      .sort((a, b) => {
+        const depA = getRoomDepartureStatus(a);
+        const depB = getRoomDepartureStatus(b);
+        if (depA?.isOverdue && !depB?.isOverdue) return -1;
+        if (!depA?.isOverdue && depB?.isOverdue) return 1;
+        return 0;
+      });
+  }, [rooms]);
+
+
+  // Open Payment Collection Modal
+  const handleOpenPaymentModal = (room) => {
+    if (!room.current_reservation_id) {
+      showToast("No active reservation found on this room", "error");
+      return;
+    }
+    setSelectedPaymentRoom(room);
+    const totalAmt = Number(room.total_amount || 0);
+    const paidAmt = Number(room.paid_amount || 0);
+    const balance = Math.max(0, totalAmt - paidAmt);
+    setPaymentForm({
+      amount: balance > 0 ? String(balance) : "",
+      payment_method: "cash",
+      transaction_reference: "",
+      notes: "",
+      receipt_image: null,
+    });
+    setPaymentModalOpen(true);
+  };
+
+  // Submit Payment Collection
+  
+  // Camera & Image Capture for Transfer Payment Receipts
+  const handlePaymentProofCapture = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement("canvas");
+        let width = img.width;
+        let height = img.height;
+        const maxDim = 1200;
+        if (width > height && width > maxDim) {
+          height = Math.round((height * maxDim) / width);
+          width = maxDim;
+        } else if (height > maxDim) {
+          width = Math.round((width * maxDim) / height);
+          height = maxDim;
+        }
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, width, height);
+        const compressed = canvas.toDataURL("image/jpeg", 0.7);
+        setPaymentForm((prev) => ({ ...prev, receipt_image: compressed }));
+      };
+      img.src = event.target.result;
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleConfirmPayment = async (e) => {
+    e.preventDefault();
+    if (!selectedPaymentRoom?.current_reservation_id) return;
+    const payAmt = Number(paymentForm.amount);
+    if (isNaN(payAmt) || payAmt <= 0) {
+      showToast("Please enter a valid payment amount", "error");
+      return;
+    }
+    try {
+      setSubmittingPayment(true);
+      await addReservationPayment(selectedPaymentRoom.current_reservation_id, {
+        amount: payAmt,
+        payment_method: paymentForm.payment_method,
+        transaction_reference: paymentForm.transaction_reference,
+        notes: paymentForm.notes,
+        receipt_image: paymentForm.receipt_image,
+        image_url: paymentForm.receipt_image,
+      });
+      showToast(`Payment of ${payAmt.toLocaleString()} ETB recorded for Room #${selectedPaymentRoom.room_number}!`);
+      setPaymentModalOpen(false);
+      setSelectedPaymentRoom(null);
+      loadData();
+    } catch (err) {
+      showToast(err.message || "Failed to record payment", "error");
+    } finally {
+      setSubmittingPayment(false);
+    }
+  };
+
+  return (
+    <div className="w-full space-y-4 sm:space-y-5">
+      {/* Toast Notification */}
+      {toast && (
+        <div
+          className={`fixed bottom-6 right-6 z-50 flex items-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold shadow-xl transition-all ${
+            toast.type === "error"
+              ? "bg-red-600 text-white"
+              : "bg-emerald-600 text-white"
+          }`}
+        >
+          {toast.type === "error" ? <XCircle size={18} /> : <CheckCircle2 size={18} />}
+          {toast.message}
+        </div>
+      )}
+
+      {/* TOP STATS CARDS (COMPACT & SMALL) */}
+      <div className="w-full grid grid-cols-2 gap-1.5 sm:gap-2 sm:grid-cols-3 lg:grid-cols-6">
+        <div className="rounded-xl border border-slate-200 bg-white p-2 sm:p-2.5 shadow-2xs">
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] font-bold uppercase text-slate-500">Total Rooms</span>
+            <span className="rounded-md bg-blue-50 p-1 text-blue-600">
+              <DoorClosed size={12} />
+            </span>
+          </div>
+          <p className="mt-0.5 text-base sm:text-lg font-black text-slate-900">{stats.total || 0}</p>
+        </div>
+
+        <div className="rounded-xl border border-emerald-100 bg-emerald-50/40 p-2 sm:p-2.5 shadow-2xs">
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] font-bold uppercase text-emerald-700">Available</span>
+            <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+          </div>
+          <p className="mt-0.5 text-base sm:text-lg font-black text-emerald-800">{stats.available || 0}</p>
+        </div>
+
+        <div className="rounded-xl border border-rose-100 bg-rose-50/40 p-2 sm:p-2.5 shadow-2xs">
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] font-bold uppercase text-rose-700">Occupied</span>
+            <span className="h-1.5 w-1.5 rounded-full bg-rose-500" />
+          </div>
+          <p className="mt-0.5 text-base sm:text-lg font-black text-rose-800">{stats.occupied || 0}</p>
+        </div>
+
+        <div className="rounded-xl border border-amber-100 bg-amber-50/40 p-2 sm:p-2.5 shadow-2xs">
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] font-bold uppercase text-amber-700">Reserved</span>
+            <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
+          </div>
+          <p className="mt-0.5 text-base sm:text-lg font-black text-amber-800">{stats.reserved || 0}</p>
+        </div>
+
+        <div className="rounded-xl border border-sky-100 bg-sky-50/40 p-2 sm:p-2.5 shadow-2xs">
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] font-bold uppercase text-sky-700">Cleaning</span>
+            <span className="rounded-md bg-sky-100 p-0.5 text-sky-600">
+              <Sparkles size={11} />
+            </span>
+          </div>
+          <p className="mt-0.5 text-base sm:text-lg font-black text-sky-800">{stats.cleaning || 0}</p>
+        </div>
+
+        <div className="rounded-xl border border-slate-200 bg-white p-2 sm:p-2.5 shadow-2xs">
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] font-bold uppercase text-slate-500">Occupancy</span>
+            <span className="text-xs font-black text-slate-800">{stats.occupancyRate || 0}%</span>
+          </div>
+          <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-slate-100">
+            <div
+              className="h-full bg-blue-600 transition-all duration-500"
+              style={{ width: `${Math.min(100, stats.occupancyRate || 0)}%` }}
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* TOOLBAR: FILTERS + ACTIONS */}
+      <div className="flex flex-col gap-3 rounded-2xl border border-slate-200 bg-white p-3 shadow-2xs lg:flex-row lg:items-center lg:justify-between">
+        <div className="flex flex-wrap items-center gap-1.5">
+          {/* Status filter tabs */}
+          {["all", "available", "occupied", "reserved", "cleaning", "maintenance"].map((st) => (
+            <button
+              key={st}
+              onClick={() => setSelectedStatus(st)}
+              className={`rounded-lg px-3 py-1 text-xs font-bold capitalize transition ${
+                selectedStatus === st
+                  ? "bg-slate-900 text-white shadow-2xs"
+                  : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+              }`}
+            >
+              {st}
+            </button>
+          ))}
+
+          {/* Quick Departures Filter Button */}
+          <button
+            type="button"
+            onClick={() => setSelectedStatus(selectedStatus === "departures" ? "all" : "departures")}
+            className={`flex items-center gap-1.5 rounded-lg px-3 py-1 text-xs font-bold transition ${
+              selectedStatus === "departures"
+                ? "bg-rose-600 text-white shadow-2xs"
+                : departureAlertRooms.length > 0
+                ? "bg-rose-50 text-rose-700 border border-rose-200 hover:bg-rose-100"
+                : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+            }`}
+            title="Filter rooms scheduled to vacate today or overdue"
+          >
+            <Clock size={12} className={departureAlertRooms.some((r) => getRoomDepartureStatus(r)?.isOverdue) ? "animate-pulse text-rose-500" : ""} />
+            <span>Departures (12 PM)</span>
+            {departureAlertRooms.length > 0 && (
+              <span className={`ml-0.5 rounded-full px-1.5 py-0.2 text-[10px] font-black ${
+                selectedStatus === "departures" ? "bg-white text-rose-700" : "bg-rose-600 text-white"
+              }`}>
+                {departureAlertRooms.length}
+              </span>
+            )}
+          </button>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2.5">
+          {/* Floor filter */}
+          {floors.length > 0 && (
+            <select
+              value={selectedFloor}
+              onChange={(e) => setSelectedFloor(e.target.value)}
+              className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-semibold text-slate-700 outline-none focus:border-blue-500"
+            >
+              <option value="all">All Floors</option>
+              {floors.map((f) => (
+                <option key={f} value={f}>
+                  Floor {f}
+                </option>
+              ))}
+            </select>
+          )}
+
+          {/* Search input */}
+          <div className="relative">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" size={13} />
+            <input
+              type="text"
+              placeholder="Search room, guest..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="rounded-lg border border-slate-200 bg-white pl-7 pr-2.5 py-1 text-xs outline-none focus:border-blue-500 w-40"
+            />
+          </div>
+
+          {/* New Walk-in Button */}
+          <button
+            onClick={() => handleOpenBooking(null, "walkin")}
+            className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-bold text-white shadow-md shadow-blue-500/20 hover:bg-blue-700 transition"
+          >
+            <Plus size={14} />
+            Walk-in Check-In
+          </button>
+
+          {/* New Reservation Button */}
+          <button
+            onClick={() => handleOpenBooking(null, "reservation")}
+            className="flex items-center gap-1.5 rounded-lg bg-amber-500 px-3 py-1.5 text-xs font-bold text-slate-950 shadow-md shadow-amber-500/20 hover:bg-amber-400 transition"
+          >
+            <CalendarCheck size={14} />
+            New Reservation
+          </button>
+        </div>
+      </div>
+
+      {/* PAYMENT COVERAGE & UNPAID STAY ALERT BANNER */}
+      {unpaidAlertRooms.length > 0 && (
+        <div className="rounded-2xl border border-rose-200 bg-rose-50/85 p-3.5 sm:p-4 shadow-xs space-y-3">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 border-b border-rose-200/60 pb-2.5">
+            <div className="flex items-center gap-2.5">
+              <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-rose-600 text-white shadow-xs shrink-0">
+                <AlertCircle size={18} />
+              </div>
+              <div>
+                <h3 className="text-xs sm:text-sm font-extrabold text-rose-950">
+                  Payment Attention Required ({unpaidAlertRooms.length} {unpaidAlertRooms.length === 1 ? "Room" : "Rooms"} with Expired or Due Stay Periods)
+                </h3>
+                <p className="text-[11px] text-rose-700">
+                  Guests below have stayed past their prepaid nights or payment coverage expires today/tomorrow. Collect balance to keep lodging up to date.
+                </p>
+              </div>
+            </div>
+            <span className="self-start sm:self-center inline-flex items-center gap-1 rounded-full bg-rose-200/80 px-2.5 py-0.5 text-[10px] font-black text-rose-900 border border-rose-300">
+              <Clock size={11} /> {unpaidAlertRooms.length} Pending Settlement
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+            {unpaidAlertRooms.map((r) => {
+              const alert = getRoomPaymentAlert(r);
+              if (!alert) return null;
+              const isExpired = alert.severity === "expired";
+              return (
+                <div
+                  key={r.id}
+                  className={`flex items-center justify-between gap-3 rounded-xl border p-2.5 bg-white shadow-2xs ${
+                    isExpired ? "border-rose-300 ring-1 ring-rose-200" : "border-amber-200"
+                  }`}
+                >
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-1.5">
+                      <span className="font-extrabold text-slate-900 text-xs">
+                        #{r.room_number}
+                      </span>
+                      <span className={`rounded px-1.5 py-0.2 text-[8px] font-black uppercase ${
+                        isExpired ? "bg-rose-100 text-rose-800" : "bg-amber-100 text-amber-900"
+                      }`}>
+                        {alert.badgeText}
+                      </span>
+                    </div>
+                    <p className="text-[11px] font-semibold text-slate-800 truncate mt-0.5">
+                      {r.guest_name || "Guest"}
+                    </p>
+                    <p className="text-[10px] text-slate-500">
+                      Paid to <strong className="text-slate-700">{alert.paidThroughStr}</strong> • <strong className="text-rose-600">{alert.balance.toLocaleString()} ETB</strong> ({alert.unpaidNights}n unpaid)
+                    </p>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => handleOpenPaymentModal(r)}
+                    className="shrink-0 rounded-lg bg-emerald-600 px-2.5 py-1.5 text-xs font-bold text-white hover:bg-emerald-700 transition flex items-center gap-1 shadow-2xs"
+                  >
+                    <DollarSign size={12} />
+                    Collect
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* ROOMS HIGH-DENSITY COMPACT GRID */}
+      {loading ? (
+        <div className="flex h-64 items-center justify-center">
+          <div className="h-8 w-8 animate-spin rounded-full border-4 border-blue-600 border-t-transparent" />
+        </div>
+      ) : filteredRooms.length === 0 ? (
+        <div className="rounded-2xl border border-dashed border-slate-300 bg-white p-10 text-center">
+          <DoorClosed className="mx-auto h-10 w-10 text-slate-400" />
+          <h3 className="mt-2 text-xs font-bold text-slate-800">No rooms found</h3>
+          <p className="mt-0.5 text-[11px] text-slate-500">
+            {rooms.length === 0
+              ? "You have no rooms created yet. Go to Room Management to add your hotel rooms."
+              : "Try adjusting your search or filter parameters."}
+          </p>
+        </div>
+      ) : (
+        <div className="w-full grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-7">
+          {filteredRooms.map((room) => {
+            const config = STATUS_CONFIG[room.status] || STATUS_CONFIG.available;
+            const paymentAlert = getRoomPaymentAlert(room);
+            const departureAlert = getRoomDepartureStatus(room);
+            const isLeaveOverdue = departureAlert?.isOverdue;
+            const isAlertUrgent = isLeaveOverdue || (paymentAlert && (paymentAlert.severity === "expired" || paymentAlert.severity === "due_today"));
+            const isAlertWarning = (departureAlert && !isLeaveOverdue) || (paymentAlert && paymentAlert.severity === "due_tomorrow");
+
+            return (
+              <div
+                key={room.id}
+                onClick={() => {
+                  if (room.status === "reserved") {
+                    handleOpenReservedDetails(room);
+                  }
+                }}
+                className={`relative flex flex-col justify-between rounded-xl border bg-white p-2 sm:p-2.5 shadow-2xs transition hover:shadow-md ${
+                  isAlertUrgent
+                    ? "border-rose-300 ring-2 ring-rose-400/60 shadow-rose-100"
+                    : isAlertWarning
+                    ? "border-amber-300 ring-2 ring-amber-300/60 shadow-amber-100"
+                    : config.border
+                } ${
+                  room.status === "reserved" ? "cursor-pointer hover:border-amber-400 hover:ring-2 hover:ring-amber-300/40" : ""
+                }`}
+              >
+                <div>
+                  {/* Top Bar: Room # & Status Badge */}
+                  <div className="flex items-start justify-between">
+                    <div>
+                      <div className="flex items-center gap-1">
+                        <span className="text-sm font-black text-slate-900 leading-tight">
+                          #{room.room_number}
+                        </span>
+                        <span className="text-[9px] text-slate-400">Fl {room.floor}</span>
+                      </div>
+                      <p className="text-[10px] font-semibold text-slate-600 truncate mt-0.5">{room.type_name}</p>
+                    </div>
+
+                    <span
+                      className={`inline-flex items-center gap-1 rounded-md border px-1 py-0.2 text-[8px] font-extrabold uppercase ${config.badge}`}
+                    >
+                      <span className={`h-1 w-1 rounded-full ${config.dot}`} />
+                      {config.label}
+                    </span>
+                  </div>
+
+                  {/* Rate */}
+                  <div className="mt-1 text-[9px] text-slate-500 truncate">
+                    Rate: <strong className="font-mono font-bold text-slate-800">{Number(room.base_rate).toLocaleString()} ETB</strong>
+                  </div>
+
+                  {/* Occupied Guest info (Compact) */}
+                  {room.status === "occupied" && (
+                    <div className="mt-1.5 rounded-lg border border-rose-100 bg-rose-50/50 p-1.5 text-[10px] space-y-0.5">
+                      <div className="flex items-center justify-between gap-1 font-bold text-slate-800">
+                        <div className="flex items-center gap-1 truncate">
+                          <User size={11} className="text-rose-600 shrink-0" />
+                          <span className="truncate text-[10px] text-slate-900">{room.guest_name}</span>
+                        </div>
+                      </div>
+
+                      {room.guest_phone && (
+                        <div className="flex items-center gap-1 text-[9px] text-slate-500 truncate">
+                          <Phone size={9} className="shrink-0" />
+                          <span className="truncate">{room.guest_phone}</span>
+                        </div>
+                      )}
+
+                      <div className="flex items-center justify-between border-t border-rose-100/60 pt-0.5 text-[9px] text-slate-600">
+                        <span>Out:</span>
+                        <span className="font-semibold text-slate-800">
+                          {room.check_out_date?.split("T")[0]} (12:00 PM)
+                        </span>
+                      </div>
+
+                      {/* 12:00 PM Departure Alert on Card */}
+                      {departureAlert && (
+                        <div className={`rounded px-1.5 py-0.5 text-[8.5px] leading-tight flex items-center justify-between gap-1 ${
+                          departureAlert.isOverdue
+                            ? "bg-rose-600 text-white font-black animate-pulse shadow-2xs"
+                            : "bg-amber-400 text-slate-950 font-bold shadow-2xs"
+                        }`}>
+                          <span className="flex items-center gap-1">
+                            <Clock size={9} />
+                            <span>${departureAlert.badgeText}</span>
+                          </span>
+                          <span className="text-[7.5px] uppercase opacity-90 font-mono">12 PM</span>
+                        </div>
+                      )}
+
+                      {/* Payment Coverage & Balance Badge */}
+                      {paymentAlert && (
+                        <div className={`rounded border p-1 text-[8.5px] leading-tight space-y-0.5 ${
+                          paymentAlert.severity === "expired"
+                            ? "border-rose-300 bg-rose-100/90 text-rose-950 font-bold"
+                            : paymentAlert.severity === "due_today"
+                            ? "border-rose-200 bg-rose-100 text-rose-900 font-bold"
+                            : paymentAlert.severity === "due_tomorrow"
+                            ? "border-amber-200 bg-amber-100 text-amber-900 font-bold"
+                            : "border-blue-200 bg-blue-50 text-blue-900"
+                        }`}>
+                          <div className="flex items-center justify-between gap-1">
+                            <span className="flex items-center gap-0.5 truncate">
+                              {paymentAlert.severity === "expired" || paymentAlert.severity === "due_today" ? (
+                                <AlertCircle size={9} className="text-rose-600 shrink-0" />
+                              ) : (
+                                <Clock size={9} className="text-amber-600 shrink-0" />
+                              )}
+                              <span className="truncate">
+                                {paymentAlert.severity === "expired"
+                                  ? `Expired (${paymentAlert.badgeText})`
+                                  : paymentAlert.severity === "due_today"
+                                  ? "Expires Today!"
+                                  : paymentAlert.severity === "due_tomorrow"
+                                  ? "Due Tomorrow"
+                                  : `Paid to ${paymentAlert.paidThroughStr}`}
+                              </span>
+                            </span>
+                            <span className="font-mono font-extrabold text-[8px] shrink-0">
+                              {paymentAlert.balance.toLocaleString()} ETB
+                            </span>
+                          </div>
+                          <div className="flex items-center justify-between text-[7.5px] opacity-85">
+                            <span>Covered to {paymentAlert.paidThroughStr}</span>
+                            <span>{paymentAlert.unpaidNights}n unpaid</span>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Guest ID Status */}
+                      <div className="flex items-center justify-between border-t border-rose-100/60 pt-0.5 text-[9px]">
+                        <span className="text-slate-500 font-medium">ID:</span>
+                        {room.id_image_url || room.id_image_back_url ? (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleViewIdImage(room.id_image_url, room.id_image_back_url);
+                            }}
+                            className="inline-flex items-center gap-0.5 rounded bg-emerald-100/90 px-1 py-0.2 text-[8px] font-bold text-emerald-800 hover:bg-emerald-200 transition"
+                            title="Click to view ID"
+                          >
+                            <Eye size={9} /> {room.id_image_url && room.id_image_back_url ? "Front & Back" : "ID Attached"}
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleOpenUpdateIdModal(room);
+                            }}
+                            className="inline-flex items-center gap-0.5 rounded bg-amber-100/90 px-1 py-0.2 text-[8px] font-bold text-amber-800 hover:bg-amber-200 transition"
+                            title="Upload ID"
+                          >
+                            <Camera size={9} /> + ID
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Reserved Guest info (Compact) */}
+                  {room.status === "reserved" && (
+                    <div
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleOpenReservedDetails(room);
+                      }}
+                      className="mt-1.5 rounded-lg border border-amber-200 bg-amber-50/70 p-1.5 text-[10px] space-y-0.5 cursor-pointer hover:border-amber-400 hover:shadow-2xs transition"
+                      title="Click to view reservation details"
+                    >
+                      <div className="flex items-center justify-between gap-1 font-bold text-slate-800">
+                        <div className="flex items-center gap-1 truncate">
+                          <CalendarCheck size={11} className="text-amber-600 shrink-0" />
+                          <span className="truncate text-[10px] text-slate-900">{room.guest_name || "Reserved Guest"}</span>
+                        </div>
+                        <span className="inline-flex items-center gap-0.5 rounded bg-amber-200/90 px-1 py-0.2 text-[7px] font-black text-amber-950 border border-amber-300 shrink-0">
+                          <Eye size={8} /> Details
+                        </span>
+                      </div>
+
+                      <div className="flex items-center justify-between border-t border-amber-200/60 pt-0.5 text-[9px] text-slate-600">
+                        <span>Check-In:</span>
+                        <span className="font-semibold text-slate-800">
+                          {room.check_in_date?.split("T")[0]}
+                        </span>
+                      </div>
+
+                      {/* Payment Coverage & Balance Badge for Reserved */}
+                      {paymentAlert && (
+                        <div className="rounded border border-amber-200 bg-amber-100/70 p-1 text-[8px] leading-tight flex items-center justify-between text-amber-950">
+                          <span className="truncate">Deposit: Covered to {paymentAlert.paidThroughStr}</span>
+                          <span className="font-mono font-bold shrink-0">{paymentAlert.balance.toLocaleString()} ETB</span>
+                        </div>
+                      )}
+
+                      {/* Guest ID Status */}
+                      <div className="flex items-center justify-between border-t border-amber-200/60 pt-0.5 text-[9px]">
+                        <span className="text-slate-500 font-medium">ID:</span>
+                        {room.id_image_url || room.id_image_back_url ? (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleViewIdImage(room.id_image_url, room.id_image_back_url);
+                            }}
+                            className="inline-flex items-center gap-0.5 rounded bg-emerald-100/90 px-1 py-0.2 text-[8px] font-bold text-emerald-800 hover:bg-emerald-200 transition"
+                            title="Click to view ID"
+                          >
+                            <Eye size={9} /> {room.id_image_url && room.id_image_back_url ? "Front & Back" : "ID Attached"}
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleOpenUpdateIdModal(room);
+                            }}
+                            className="inline-flex items-center gap-0.5 rounded bg-amber-100/90 px-1 py-0.2 text-[8px] font-bold text-amber-800 hover:bg-amber-200 transition"
+                            title="Upload ID"
+                          >
+                            <Camera size={9} /> + ID
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Cleaning Banner (Compact) */}
+                  {room.status === "cleaning" && (
+                    <div className="mt-1.5 rounded-lg border border-sky-100 bg-sky-50/50 p-1.5 text-[9px] flex items-center gap-1 text-sky-800">
+                      <Sparkles size={10} className="shrink-0" />
+                      <span className="truncate">Housekeeping</span>
+                    </div>
+                  )}
+
+                  {/* Maintenance Banner (Compact) */}
+                  {room.status === "maintenance" && (
+                    <div className="mt-1.5 rounded-lg border border-slate-200 bg-slate-50 p-1.5 text-[9px] flex items-center gap-1 text-slate-600">
+                      <Wrench size={10} className="shrink-0" />
+                      <span className="truncate">Maintenance</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Card Footer Actions (Compact) */}
+                <div className="mt-2 border-t border-slate-100 pt-1.5">
+                  {room.status === "available" && (
+                    <div className="grid grid-cols-2 gap-1">
+                      <button
+                        onClick={() => handleOpenBooking(room, "walkin")}
+                        className="rounded-md bg-blue-600 px-1.5 py-0.5 text-[10px] sm:text-[11px] font-bold text-white hover:bg-blue-700 transition text-center"
+                      >
+                        Walk-In
+                      </button>
+                      <button
+                        onClick={() => handleOpenBooking(room, "reservation")}
+                        className="rounded-md border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[10px] sm:text-[11px] font-bold text-slate-700 hover:bg-slate-100 transition text-center"
+                      >
+                        Reserve
+                      </button>
+                    </div>
+                  )}
+
+                  {room.status === "occupied" && (
+                    <div className="flex gap-1">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleOpenAmendPrice(room);
+                        }}
+                        className="rounded-md border border-amber-300 bg-amber-50 px-1.5 py-0.5 text-[10px] font-bold text-amber-900 hover:bg-amber-100 transition flex items-center justify-center gap-0.5 shadow-2xs cursor-pointer"
+                        title="Amend Price for Special Guest"
+                      >
+                        <Tag size={10} className="text-amber-700" />
+                        Price
+                      </button>
+                      <button
+                        onClick={() => handleOpenUpdateIdModal(room)}
+                        className="rounded-md border border-slate-200 bg-white px-1.5 py-0.5 text-[10px] font-bold text-slate-700 hover:bg-slate-50 transition flex items-center justify-center gap-0.5 shadow-2xs"
+                        title="Update ID / Guest details"
+                      >
+                        <Camera size={10} className="text-blue-600" />
+                        ID
+                      </button>
+                      <button
+                        onClick={() => handleOpenPaymentModal(room)}
+                        className={`rounded-md px-1.5 py-0.5 text-[10px] font-bold transition flex items-center justify-center gap-0.5 shadow-2xs ${
+                          isAlertUrgent
+                            ? "bg-rose-600 text-white hover:bg-rose-700 font-black animate-pulse"
+                            : isAlertWarning
+                            ? "bg-amber-500 text-slate-950 hover:bg-amber-400 font-black"
+                            : "bg-emerald-600 text-white hover:bg-emerald-700"
+                        }`}
+                        title="Record Payment / Settle Balance"
+                      >
+                        <DollarSign size={10} />
+                        Pay
+                      </button>
+                      <button
+                        onClick={() => handleOpenCheckout(room)}
+                        className="flex-1 rounded-md bg-slate-800 px-1.5 py-0.5 text-[10px] sm:text-[11px] font-bold text-white hover:bg-slate-900 transition"
+                      >
+                        Check-Out
+                      </button>
+                    </div>
+                  )}
+
+                  {room.status === "reserved" && (
+                    <div className="flex gap-1">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleOpenAmendPrice(room);
+                        }}
+                        className="rounded-md border border-amber-300 bg-amber-50 px-1.5 py-0.5 text-[10px] font-bold text-amber-900 hover:bg-amber-100 transition flex items-center justify-center gap-0.5 shadow-2xs cursor-pointer"
+                        title="Amend Price for Special Guest"
+                      >
+                        <Tag size={10} className="text-amber-700" />
+                        Price
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleOpenReservedDetails(room);
+                        }}
+                        className="rounded-md border border-amber-300 bg-amber-50 px-1.5 py-0.5 text-[10px] font-bold text-amber-900 hover:bg-amber-100 transition flex items-center justify-center gap-0.5 shadow-2xs"
+                        title="View who reserved this room"
+                      >
+                        <Eye size={10} className="text-amber-700" />
+                        Details
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleOpenUpdateIdModal(room);
+                        }}
+                        className="rounded-md border border-slate-200 bg-white px-1 py-0.5 text-[10px] font-bold text-slate-700 hover:bg-slate-50 transition flex items-center justify-center shadow-2xs"
+                        title="Update ID"
+                      >
+                        <Camera size={10} className="text-blue-600" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={async (e) => {
+                          e.stopPropagation();
+                          try {
+                            await checkInReservation(room.current_reservation_id);
+                            showToast(`Room ${room.room_number} checked in!`);
+                            loadData();
+                          } catch (err) {
+                            showToast(err.message, "error");
+                          }
+                        }}
+                        className="flex-1 rounded-lg bg-amber-500 px-2 py-1 text-xs font-extrabold text-slate-950 hover:bg-amber-400 transition"
+                      >
+                        Check-In
+                      </button>
+                    </div>
+                  )}
+
+                  {room.status === "cleaning" && (
+                    <button
+                      onClick={() => handleStatusChange(room.id, "available")}
+                      className="w-full flex items-center justify-center gap-1 rounded-lg bg-emerald-600 px-2 py-1 text-xs font-bold text-white hover:bg-emerald-700 transition"
+                    >
+                      <CheckCircle2 size={12} />
+                      Mark Ready
+                    </button>
+                  )}
+
+                  {room.status === "maintenance" && (
+                    <button
+                      onClick={() => handleStatusChange(room.id, "available")}
+                      className="w-full rounded-lg border border-slate-300 px-2 py-1 text-xs font-bold text-slate-700 hover:bg-slate-100 transition"
+                    >
+                      Restore to Ready
+                    </button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* ====================================================
+          MODAL: NEW WALK-IN / RESERVATION
+      ==================================================== */}
+      {bookingModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-2xl max-h-[90vh] overflow-y-auto rounded-3xl bg-white shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-100 p-6">
+              <div>
+                <h3 className="text-lg font-bold text-slate-900">
+                  {bookingType === "walkin" ? "Guest Walk-In Check-In" : "New Room Reservation"}
+                </h3>
+                <p className="text-xs text-slate-500">
+                  {bookingType === "walkin"
+                    ? "Assign an available room and check in the guest immediately."
+                    : "Reserve a room for future dates."}
+                </p>
+              </div>
+              <button
+                onClick={() => setBookingModalOpen(false)}
+                className="rounded-full p-2 text-slate-400 hover:bg-slate-100 hover:text-slate-600"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            <form onSubmit={handleSubmitBooking} className="p-6 space-y-5">
+              {/* Type Switcher */}
+              <div className="flex rounded-xl bg-slate-100 p-1">
+                <button
+                  type="button"
+                  onClick={() => setBookingType("walkin")}
+                  className={`flex-1 rounded-lg py-2 text-xs font-bold transition ${
+                    bookingType === "walkin"
+                      ? "bg-white text-slate-900 shadow-sm"
+                      : "text-slate-500 hover:text-slate-800"
+                  }`}
+                >
+                  ⚡ Instant Walk-in
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setBookingType("reservation")}
+                  className={`flex-1 rounded-lg py-2 text-xs font-bold transition ${
+                    bookingType === "reservation"
+                      ? "bg-white text-slate-900 shadow-sm"
+                      : "text-slate-500 hover:text-slate-800"
+                  }`}
+                >
+                  📅 Advance Reservation
+                </button>
+              </div>
+
+              
+
+
+              {/* Guest Details */}
+              <div>
+                <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-3">
+                  Guest Information
+                </h4>
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Full Name *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="e.g. Abebe Bekele"
+                      value={bookingForm.guest_name}
+                      onChange={(e) => setBookingForm({ ...bookingForm, guest_name: e.target.value })}
+                      className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm outline-none focus:border-blue-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Phone Number
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="+251 91 123 4567"
+                      value={bookingForm.guest_phone}
+                      onChange={(e) => setBookingForm({ ...bookingForm, guest_phone: e.target.value })}
+                      className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm outline-none focus:border-blue-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Email Address
+                    </label>
+                    <input
+                      type="email"
+                      placeholder="guest@example.com"
+                      value={bookingForm.guest_email}
+                      onChange={(e) => setBookingForm({ ...bookingForm, guest_email: e.target.value })}
+                      className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm outline-none focus:border-blue-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      ID / Passport No.
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="e.g. EP1234567"
+                      value={bookingForm.guest_id_number}
+                      onChange={(e) => setBookingForm({ ...bookingForm, guest_id_number: e.target.value })}
+                      className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm outline-none focus:border-blue-500"
+                    />
+                  </div>
+
+                  {/* Dual Front & Back ID Photo Capture */}
+                  <div className="sm:col-span-2">
+                    <div className="flex items-center justify-between mb-2">
+                      <label className="text-xs font-semibold text-slate-700 flex items-center gap-1.5">
+                        <Camera size={14} className="text-blue-600" />
+                        Guest ID / Passport Photos (Front & Back)
+                      </label>
+                      <span className="text-[11px] text-slate-400">
+                        Camera or file upload
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      {/* Front Side */}
+                      <div className="rounded-2xl border border-slate-200 bg-slate-50/60 p-3">
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="text-xs font-bold text-slate-700 flex items-center gap-1">
+                            <span className="flex h-4 w-4 items-center justify-center rounded-full bg-blue-100 text-[10px] font-bold text-blue-700">1</span>
+                            Front Side of ID
+                          </span>
+                          {bookingForm.id_image_preview && (
+                            <button
+                              type="button"
+                              onClick={() => setBookingForm({ ...bookingForm, id_image_file: null, id_image_preview: null })}
+                              className="text-[11px] text-rose-600 hover:underline font-semibold"
+                            >
+                              Remove
+                            </button>
+                          )}
+                        </div>
+
+                        {bookingForm.id_image_preview ? (
+                          <div className="relative rounded-xl border border-blue-200 bg-white p-2 text-center">
+                            <img
+                              src={bookingForm.id_image_preview}
+                              alt="Front ID"
+                              className="mx-auto max-h-28 w-full object-contain rounded-lg border border-blue-100"
+                            />
+                            <p className="mt-1 text-[11px] font-semibold text-blue-700 flex items-center justify-center gap-1">
+                              <Check size={12} /> Front captured
+                            </p>
+                            <label className="mt-1.5 inline-flex items-center gap-1 cursor-pointer rounded-lg bg-slate-50 border border-slate-200 px-3 py-1 text-xs font-bold text-slate-700 hover:bg-slate-100 shadow-2xs">
+                              <Camera size={12} className="text-blue-600" /> Retake
+                              <input
+                                type="file"
+                                accept="image/*"
+                                capture="environment"
+                                className="hidden"
+                                onChange={(e) => {
+                                  const file = e.target.files?.[0];
+                                  if (file) {
+                                    const reader = new FileReader();
+                                    reader.onload = (ev) => {
+                                      setBookingForm({
+                                        ...bookingForm,
+                                        id_image_file: file,
+                                        id_image_preview: ev.target.result,
+                                      });
+                                    };
+                                    reader.readAsDataURL(file);
+                                  }
+                                }}
+                              />
+                            </label>
+                          </div>
+                        ) : (
+                          <label className="flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed border-slate-300 bg-white p-4 transition hover:border-blue-400 hover:bg-blue-50/20 text-center">
+                            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-blue-50 text-blue-600 mb-2 shadow-2xs">
+                              <Camera size={16} />
+                            </div>
+                            <span className="text-xs font-bold text-slate-800">
+                              Snap Front of ID
+                            </span>
+                            <span className="text-[10px] text-slate-400 mt-0.5">
+                              Camera or file browse
+                            </span>
+                            <input
+                              type="file"
+                              accept="image/*"
+                              capture="environment"
+                              className="hidden"
+                              onChange={(e) => {
+                                const file = e.target.files?.[0];
+                                if (file) {
+                                  const reader = new FileReader();
+                                  reader.onload = (ev) => {
+                                    setBookingForm({
+                                      ...bookingForm,
+                                      id_image_file: file,
+                                      id_image_preview: ev.target.result,
+                                    });
+                                  };
+                                  reader.readAsDataURL(file);
+                                }
+                              }}
+                            />
+                          </label>
+                        )}
+                      </div>
+
+                      {/* Back Side */}
+                      <div className="rounded-2xl border border-slate-200 bg-slate-50/60 p-3">
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="text-xs font-bold text-slate-700 flex items-center gap-1">
+                            <span className="flex h-4 w-4 items-center justify-center rounded-full bg-indigo-100 text-[10px] font-bold text-indigo-700">2</span>
+                            Back Side of ID
+                          </span>
+                          {bookingForm.id_image_back_preview && (
+                            <button
+                              type="button"
+                              onClick={() => setBookingForm({ ...bookingForm, id_image_back_file: null, id_image_back_preview: null })}
+                              className="text-[11px] text-rose-600 hover:underline font-semibold"
+                            >
+                              Remove
+                            </button>
+                          )}
+                        </div>
+
+                        {bookingForm.id_image_back_preview ? (
+                          <div className="relative rounded-xl border border-indigo-200 bg-white p-2 text-center">
+                            <img
+                              src={bookingForm.id_image_back_preview}
+                              alt="Back ID"
+                              className="mx-auto max-h-28 w-full object-contain rounded-lg border border-indigo-100"
+                            />
+                            <p className="mt-1 text-[11px] font-semibold text-indigo-700 flex items-center justify-center gap-1">
+                              <Check size={12} /> Back captured
+                            </p>
+                            <label className="mt-1.5 inline-flex items-center gap-1 cursor-pointer rounded-lg bg-slate-50 border border-slate-200 px-3 py-1 text-xs font-bold text-slate-700 hover:bg-slate-100 shadow-2xs">
+                              <Camera size={12} className="text-indigo-600" /> Retake
+                              <input
+                                type="file"
+                                accept="image/*"
+                                capture="environment"
+                                className="hidden"
+                                onChange={(e) => {
+                                  const file = e.target.files?.[0];
+                                  if (file) {
+                                    const reader = new FileReader();
+                                    reader.onload = (ev) => {
+                                      setBookingForm({
+                                        ...bookingForm,
+                                        id_image_back_file: file,
+                                        id_image_back_preview: ev.target.result,
+                                      });
+                                    };
+                                    reader.readAsDataURL(file);
+                                  }
+                                }}
+                              />
+                            </label>
+                          </div>
+                        ) : (
+                          <label className="flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed border-slate-300 bg-white p-4 transition hover:border-indigo-400 hover:bg-indigo-50/20 text-center">
+                            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-50 text-indigo-600 mb-2 shadow-2xs">
+                              <Camera size={16} />
+                            </div>
+                            <span className="text-xs font-bold text-slate-800">
+                              Snap Back of ID
+                            </span>
+                            <span className="text-[10px] text-slate-400 mt-0.5">
+                              Camera or file browse
+                            </span>
+                            <input
+                              type="file"
+                              accept="image/*"
+                              capture="environment"
+                              className="hidden"
+                              onChange={(e) => {
+                                const file = e.target.files?.[0];
+                                if (file) {
+                                  const reader = new FileReader();
+                                  reader.onload = (ev) => {
+                                    setBookingForm({
+                                      ...bookingForm,
+                                      id_image_back_file: file,
+                                      id_image_back_preview: ev.target.result,
+                                    });
+                                  };
+                                  reader.readAsDataURL(file);
+                                }
+                              }}
+                            />
+                          </label>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Room & Stay Dates */}
+              <div>
+                <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-3">
+                  Stay & Room Selection
+                </h4>
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Select Room *
+                    </label>
+                    <select
+                      required
+                      value={bookingForm.room_id}
+                      onChange={(e) => {
+                        const rId = e.target.value;
+                        const r = rooms.find((x) => String(x.id) === String(rId));
+                        setBookingForm({
+                          ...bookingForm,
+                          room_id: rId,
+                          rate_per_night: r ? String(r.base_rate) : bookingForm.rate_per_night,
+                        });
+                      }}
+                      className="w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm outline-none focus:border-blue-500"
+                    >
+                      <option value="">-- Choose a Room --</option>
+                      {rooms
+                        .filter((r) => r.status === "available" || (selectedRoom && r.id === selectedRoom.id))
+                        .map((r) => (
+                          <option key={r.id} value={r.id}>
+                            Room #{r.room_number} - {r.type_name} ({Number(r.base_rate).toLocaleString()} ETB/nt)
+                          </option>
+                        ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="flex items-center justify-between text-xs font-semibold text-slate-700 mb-1">
+                      <span>Room Rate Per Night (ETB) *</span>
+                      <span className="flex items-center gap-1 text-[10px] font-bold text-slate-500 uppercase bg-slate-100 px-2 py-0.5 rounded border border-slate-200">
+                        <Lock size={10} className="text-slate-500" /> Official Rate (Locked)
+                      </span>
+                    </label>
+                    <div className="relative">
+                      <input
+                        type="number"
+                        step="0.01"
+                        required
+                        readOnly
+                        value={bookingForm.rate_per_night}
+                        placeholder="0.00"
+                        className="w-full rounded-xl border border-slate-200 bg-slate-100/90 px-3.5 py-2.5 text-sm font-bold font-mono text-slate-700 outline-none cursor-not-allowed select-none shadow-inner"
+                        title="Room rate is fixed based on hotel room catalog and cannot be manually edited."
+                      />
+                      <div className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none">
+                        <Lock size={14} />
+                      </div>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Check-In Date *
+                    </label>
+                    <input
+                      type="date"
+                      required
+                      value={bookingForm.check_in_date}
+                      onChange={(e) => setBookingForm({ ...bookingForm, check_in_date: e.target.value })}
+                      className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm outline-none focus:border-blue-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Check-Out Date *
+                    </label>
+                    <input
+                      type="date"
+                      required
+                      min={bookingForm.check_in_date}
+                      value={bookingForm.check_out_date}
+                      onChange={(e) => setBookingForm({ ...bookingForm, check_out_date: e.target.value })}
+                      className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm outline-none focus:border-blue-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">Adults</label>
+                    <input
+                      type="number"
+                      min="1"
+                      value={bookingForm.adults}
+                      onChange={(e) => setBookingForm({ ...bookingForm, adults: parseInt(e.target.value, 10) || 1 })}
+                      className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm outline-none focus:border-blue-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">Children</label>
+                    <input
+                      type="number"
+                      min="0"
+                      value={bookingForm.children}
+                      onChange={(e) => setBookingForm({ ...bookingForm, children: parseInt(e.target.value, 10) || 0 })}
+                      className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm outline-none focus:border-blue-500"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Total Calculation & Payment */}
+              <div className="rounded-2xl bg-slate-50 p-4 border border-slate-200/80">
+                <div className="flex items-center justify-between text-sm mb-3">
+                  <span className="text-slate-600">
+                    Stay Duration: <strong className="text-slate-900">{calculatedNights} Night(s)</strong>
+                  </span>
+                  <span className="text-slate-600">
+                    Total Accommodation: <strong className="text-blue-600 font-bold">{Number(calculatedTotal || 0).toLocaleString()} ETB</strong>
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 pt-2 border-t border-slate-200">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      {bookingType === "walkin" ? "Initial Payment / Full Payment" : "Advance Deposit"}
+                    </label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      placeholder="0.00"
+                      value={bookingForm.initial_payment}
+                      onChange={(e) => setBookingForm({ ...bookingForm, initial_payment: e.target.value })}
+                      className="w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-sm outline-none focus:border-blue-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Payment Method
+                    </label>
+                    <select
+                      value={bookingForm.payment_method}
+                      onChange={(e) => setBookingForm({ ...bookingForm, payment_method: e.target.value })}
+                      className="w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-sm outline-none focus:border-blue-500"
+                    >
+                      <option value="cash">💵 Cash</option>
+                      <option value="transfer">📲 Transfer</option>
+                      <option value="pos_machine">💳 POS Machine</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              {/* Submit Buttons */}
+              <div className="flex items-center justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setBookingModalOpen(false)}
+                  className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-600 hover:bg-slate-50 transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="rounded-xl bg-blue-600 px-6 py-2.5 text-sm font-bold text-white shadow-lg shadow-blue-500/20 hover:bg-blue-700 transition"
+                >
+                  {bookingType === "walkin" ? "Check In Guest" : "Confirm Booking"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ====================================================
+          MODAL: CHECK-OUT & BILL SETTLEMENT
+      ==================================================== */}
+      {checkoutModalOpen && activeReservation && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-lg rounded-3xl bg-white shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-100 p-6">
+              <div>
+                <h3 className="text-lg font-bold text-slate-900">
+                  Check-Out: Room #{activeReservation.room_number}
+                </h3>
+                <p className="text-xs text-slate-500">
+                  Settle balance, complete checkout, and free room for cleaning.
+                </p>
+              </div>
+              <button
+                onClick={() => setCheckoutModalOpen(false)}
+                className="rounded-full p-2 text-slate-400 hover:bg-slate-100 hover:text-slate-600"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            <form onSubmit={handleConfirmCheckout} className="p-6 space-y-5">
+              {/* Guest & Stay Details */}
+              <div className="rounded-2xl bg-slate-50 p-4 space-y-2 text-xs">
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Guest Name:</span>
+                  <span className="font-bold text-slate-900">{activeReservation.guest_name}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Dates:</span>
+                  <span className="font-medium text-slate-800">
+                    {activeReservation.check_in_date?.split("T")[0]} → {activeReservation.check_out_date?.split("T")[0]}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Total Charged:</span>
+                  <span className="font-semibold text-slate-900">
+                    ${Number(activeReservation.total_amount).toFixed(2)}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Previously Paid:</span>
+                  <span className="font-semibold text-emerald-600">
+                    -${Number(activeReservation.paid_amount).toFixed(2)}
+                  </span>
+                </div>
+                <div className="flex justify-between border-t border-slate-200 pt-2 text-sm">
+                  <span className="font-bold text-slate-800">Outstanding Balance:</span>
+                  <span className="font-extrabold text-rose-600">
+                    ${Number(activeReservation.balance_due).toFixed(2)}
+                  </span>
+                </div>
+              </div>
+
+              {/* Settlement Payment Input */}
+              {activeReservation.balance_due > 0 && (
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Payment Amount Now ($)
+                    </label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={activeReservation.payment_amount}
+                      onChange={(e) =>
+                        setActiveReservation({
+                          ...activeReservation,
+                          payment_amount: e.target.value,
+                        })
+                      }
+                      className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm outline-none focus:border-blue-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Payment Method
+                    </label>
+                    <select
+                      value={activeReservation.payment_method}
+                      onChange={(e) =>
+                        setActiveReservation({
+                          ...activeReservation,
+                          payment_method: e.target.value,
+                        })
+                      }
+                      className="w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm outline-none focus:border-blue-500"
+                    >
+                      <option value="cash">💵 Cash</option>
+                      <option value="transfer">📲 Transfer</option>
+                      <option value="pos_machine">💳 POS Machine</option>
+                      <option value="other">Other</option>
+                    </select>
+                  </div>
+                </div>
+              )}
+
+              {/* Actions */}
+              <div className="flex items-center justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setCheckoutModalOpen(false)}
+                  className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-600 hover:bg-slate-50 transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="rounded-xl bg-rose-600 px-6 py-2.5 text-sm font-bold text-white shadow-lg shadow-rose-500/20 hover:bg-rose-700 transition"
+                >
+                  Process Check-Out
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ====================================================
+          MODAL: UPDATE CHECK-IN & GUEST ID (MOBILE FRIENDLY)
+      ==================================================== */}
+      {updateIdModalOpen && selectedResForUpdate && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-sm overflow-y-auto">
+          <div className="w-full max-w-lg rounded-3xl bg-white shadow-2xl overflow-hidden my-6">
+            <div className="flex items-center justify-between border-b border-slate-100 p-5 bg-gradient-to-r from-blue-50/50 to-indigo-50/50">
+              <div className="flex items-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-blue-600 text-white shadow-md shadow-blue-500/20">
+                  <Camera size={20} />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-slate-900">
+                    Update Check-In / Guest ID
+                  </h3>
+                  <p className="text-xs text-slate-500 font-medium">
+                    Room #{selectedResForUpdate.room_number} • {selectedResForUpdate.reservation_code || "Active Stay"}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setUpdateIdModalOpen(false)}
+                className="rounded-full p-2 text-slate-400 hover:bg-white hover:text-slate-600 transition shadow-sm"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveIdUpdate} className="p-6 space-y-4">
+              {/* Dual Photo Area (Front & Back) */}
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                    <Camera size={14} className="text-blue-600" />
+                    Guest ID Photos (Front & Back)
+                  </label>
+                  <span className="text-[11px] text-slate-400">
+                    Capture or browse both sides
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {/* Front Side Card */}
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50/50 p-3">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xs font-bold text-slate-700 flex items-center gap-1">
+                        <span className="flex h-4 w-4 items-center justify-center rounded-full bg-blue-100 text-[10px] font-bold text-blue-700">1</span>
+                        Front Side of ID
+                      </span>
+                      {idUpdateForm.id_image_preview && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setIdUpdateForm({
+                              ...idUpdateForm,
+                              id_image_file: null,
+                              id_image_preview: null,
+                            })
+                          }
+                          className="text-[11px] text-rose-600 hover:underline font-semibold"
+                        >
+                          Clear New
+                        </button>
+                      )}
+                    </div>
+
+                    {idUpdateForm.id_image_preview ? (
+                      <div className="relative rounded-xl border border-blue-300 bg-blue-50/50 p-2 text-center">
+                        <img
+                          src={idUpdateForm.id_image_preview}
+                          alt="Front ID Preview"
+                          className="mx-auto max-h-36 w-full object-contain rounded-lg border border-blue-200 shadow-sm"
+                        />
+                        <p className="mt-1 text-[11px] font-semibold text-blue-700 flex items-center justify-center gap-1">
+                          <Check size={12} /> New Front Captured
+                        </p>
+                        <label className="mt-1.5 inline-flex items-center gap-1 cursor-pointer rounded-lg bg-white border border-slate-200 px-3 py-1 text-xs font-bold text-slate-700 shadow-sm hover:bg-slate-50">
+                          <Camera size={12} className="text-blue-600" /> Retake Front
+                          <input
+                            type="file"
+                            accept="image/*"
+                            capture="environment"
+                            className="hidden"
+                            onChange={(e) => {
+                              const file = e.target.files?.[0];
+                              if (file) {
+                                const reader = new FileReader();
+                                reader.onload = (ev) => {
+                                  setIdUpdateForm({
+                                    ...idUpdateForm,
+                                    id_image_file: file,
+                                    id_image_preview: ev.target.result,
+                                  });
+                                };
+                                reader.readAsDataURL(file);
+                              }
+                            }}
+                          />
+                        </label>
+                      </div>
+                    ) : idUpdateForm.existing_id_image_url ? (
+                      <div className="relative rounded-xl border border-slate-200 bg-white p-2 text-center">
+                        <img
+                          src={getFullImageUrl(idUpdateForm.existing_id_image_url)}
+                          alt="Current Front ID"
+                          className="mx-auto max-h-36 w-full object-contain rounded-lg border border-slate-200 shadow-sm cursor-pointer hover:opacity-90 transition"
+                          onClick={() => handleViewIdImage(idUpdateForm.existing_id_image_url, idUpdateForm.existing_id_image_back_url)}
+                        />
+                        <div className="mt-2 flex items-center justify-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => handleViewIdImage(idUpdateForm.existing_id_image_url, idUpdateForm.existing_id_image_back_url)}
+                            className="rounded-lg bg-slate-800 px-2.5 py-1 text-[11px] font-bold text-white hover:bg-slate-900 flex items-center gap-1"
+                          >
+                            <Eye size={12} /> View
+                          </button>
+                          <label className="inline-flex items-center gap-1 cursor-pointer rounded-lg bg-blue-600 px-2.5 py-1 text-[11px] font-bold text-white hover:bg-blue-700 transition">
+                            <Camera size={12} /> Replace
+                            <input
+                              type="file"
+                              accept="image/*"
+                              capture="environment"
+                              className="hidden"
+                              onChange={(e) => {
+                                const file = e.target.files?.[0];
+                                if (file) {
+                                  const reader = new FileReader();
+                                  reader.onload = (ev) => {
+                                    setIdUpdateForm({
+                                      ...idUpdateForm,
+                                      id_image_file: file,
+                                      id_image_preview: ev.target.result,
+                                    });
+                                  };
+                                  reader.readAsDataURL(file);
+                                }
+                              }}
+                            />
+                          </label>
+                        </div>
+                      </div>
+                    ) : (
+                      <label className="flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed border-slate-300 bg-white p-5 transition hover:border-blue-400 hover:bg-blue-50/20 text-center">
+                        <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-blue-50 text-blue-600 mb-2 shadow-sm">
+                          <Camera size={18} />
+                        </div>
+                        <span className="text-xs font-bold text-slate-800">
+                          Snap Front Side
+                        </span>
+                        <span className="text-[10px] text-slate-400 mt-0.5">
+                          Camera or browse file
+                        </span>
+                        <input
+                          type="file"
+                          accept="image/*"
+                          capture="environment"
+                          className="hidden"
+                          onChange={(e) => {
+                            const file = e.target.files?.[0];
+                            if (file) {
+                              const reader = new FileReader();
+                              reader.onload = (ev) => {
+                                setIdUpdateForm({
+                                  ...idUpdateForm,
+                                  id_image_file: file,
+                                  id_image_preview: ev.target.result,
+                                });
+                              };
+                              reader.readAsDataURL(file);
+                            }
+                          }}
+                        />
+                      </label>
+                    )}
+                  </div>
+
+                  {/* Back Side Card */}
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50/50 p-3">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xs font-bold text-slate-700 flex items-center gap-1">
+                        <span className="flex h-4 w-4 items-center justify-center rounded-full bg-indigo-100 text-[10px] font-bold text-indigo-700">2</span>
+                        Back Side of ID
+                      </span>
+                      {idUpdateForm.id_image_back_preview && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setIdUpdateForm({
+                              ...idUpdateForm,
+                              id_image_back_file: null,
+                              id_image_back_preview: null,
+                            })
+                          }
+                          className="text-[11px] text-rose-600 hover:underline font-semibold"
+                        >
+                          Clear New
+                        </button>
+                      )}
+                    </div>
+
+                    {idUpdateForm.id_image_back_preview ? (
+                      <div className="relative rounded-xl border border-indigo-300 bg-indigo-50/50 p-2 text-center">
+                        <img
+                          src={idUpdateForm.id_image_back_preview}
+                          alt="Back ID Preview"
+                          className="mx-auto max-h-36 w-full object-contain rounded-lg border border-indigo-200 shadow-sm"
+                        />
+                        <p className="mt-1 text-[11px] font-semibold text-indigo-700 flex items-center justify-center gap-1">
+                          <Check size={12} /> New Back Captured
+                        </p>
+                        <label className="mt-1.5 inline-flex items-center gap-1 cursor-pointer rounded-lg bg-white border border-slate-200 px-3 py-1 text-xs font-bold text-slate-700 shadow-sm hover:bg-slate-50">
+                          <Camera size={12} className="text-indigo-600" /> Retake Back
+                          <input
+                            type="file"
+                            accept="image/*"
+                            capture="environment"
+                            className="hidden"
+                            onChange={(e) => {
+                              const file = e.target.files?.[0];
+                              if (file) {
+                                const reader = new FileReader();
+                                reader.onload = (ev) => {
+                                  setIdUpdateForm({
+                                    ...idUpdateForm,
+                                    id_image_back_file: file,
+                                    id_image_back_preview: ev.target.result,
+                                  });
+                                };
+                                reader.readAsDataURL(file);
+                              }
+                            }}
+                          />
+                        </label>
+                      </div>
+                    ) : idUpdateForm.existing_id_image_back_url ? (
+                      <div className="relative rounded-xl border border-slate-200 bg-white p-2 text-center">
+                        <img
+                          src={getFullImageUrl(idUpdateForm.existing_id_image_back_url)}
+                          alt="Current Back ID"
+                          className="mx-auto max-h-36 w-full object-contain rounded-lg border border-slate-200 shadow-sm cursor-pointer hover:opacity-90 transition"
+                          onClick={() => handleViewIdImage(idUpdateForm.existing_id_image_url, idUpdateForm.existing_id_image_back_url)}
+                        />
+                        <div className="mt-2 flex items-center justify-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => handleViewIdImage(idUpdateForm.existing_id_image_url, idUpdateForm.existing_id_image_back_url)}
+                            className="rounded-lg bg-slate-800 px-2.5 py-1 text-[11px] font-bold text-white hover:bg-slate-900 flex items-center gap-1"
+                          >
+                            <Eye size={12} /> View
+                          </button>
+                          <label className="inline-flex items-center gap-1 cursor-pointer rounded-lg bg-indigo-600 px-2.5 py-1 text-[11px] font-bold text-white hover:bg-indigo-700 transition">
+                            <Camera size={12} /> Replace
+                            <input
+                              type="file"
+                              accept="image/*"
+                              capture="environment"
+                              className="hidden"
+                              onChange={(e) => {
+                                const file = e.target.files?.[0];
+                                if (file) {
+                                  const reader = new FileReader();
+                                  reader.onload = (ev) => {
+                                    setIdUpdateForm({
+                                      ...idUpdateForm,
+                                      id_image_back_file: file,
+                                      id_image_back_preview: ev.target.result,
+                                    });
+                                  };
+                                  reader.readAsDataURL(file);
+                                }
+                              }}
+                            />
+                          </label>
+                        </div>
+                      </div>
+                    ) : (
+                      <label className="flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed border-slate-300 bg-white p-5 transition hover:border-indigo-400 hover:bg-indigo-50/20 text-center">
+                        <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-indigo-50 text-indigo-600 mb-2 shadow-sm">
+                          <Camera size={18} />
+                        </div>
+                        <span className="text-xs font-bold text-slate-800">
+                          Snap Back Side
+                        </span>
+                        <span className="text-[10px] text-slate-400 mt-0.5">
+                          Camera or browse file
+                        </span>
+                        <input
+                          type="file"
+                          accept="image/*"
+                          capture="environment"
+                          className="hidden"
+                          onChange={(e) => {
+                            const file = e.target.files?.[0];
+                            if (file) {
+                              const reader = new FileReader();
+                              reader.onload = (ev) => {
+                                setIdUpdateForm({
+                                  ...idUpdateForm,
+                                  id_image_back_file: file,
+                                  id_image_back_preview: ev.target.result,
+                                });
+                              };
+                              reader.readAsDataURL(file);
+                            }
+                          }}
+                        />
+                      </label>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Guest Details Edit */}
+              <div className="pt-2 border-t border-slate-100">
+                <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-3">
+                  Guest Identification Details
+                </h4>
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Guest Full Name
+                    </label>
+                    <input
+                      type="text"
+                      value={idUpdateForm.guest_name}
+                      onChange={(e) => setIdUpdateForm({ ...idUpdateForm, guest_name: e.target.value })}
+                      className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm outline-none focus:border-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      ID / Passport Number
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="e.g. EP987654"
+                      value={idUpdateForm.guest_id_number}
+                      onChange={(e) => setIdUpdateForm({ ...idUpdateForm, guest_id_number: e.target.value })}
+                      className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm outline-none focus:border-blue-500"
+                    />
+                  </div>
+                  <div className="sm:col-span-2">
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Guest Phone Number
+                    </label>
+                    <input
+                      type="text"
+                      value={idUpdateForm.guest_phone}
+                      onChange={(e) => setIdUpdateForm({ ...idUpdateForm, guest_phone: e.target.value })}
+                      className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm outline-none focus:border-blue-500"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Actions */}
+              <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setUpdateIdModalOpen(false)}
+                  className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-600 hover:bg-slate-50 transition"
+                  disabled={submittingIdUpdate}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={submittingIdUpdate}
+                  className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-6 py-2.5 text-sm font-bold text-white shadow-lg shadow-blue-500/20 hover:bg-blue-700 transition disabled:opacity-50"
+                >
+                  {submittingIdUpdate ? (
+                    <>
+                      <Loader2 size={16} className="animate-spin" />
+                      Saving...
+                    </>
+                  ) : (
+                    <>
+                      <Check size={16} />
+                      Save Check-In Updates
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ====================================================
+          MODAL: FULLSCREEN GUEST ID IMAGE VIEWER (FRONT & BACK)
+      ==================================================== */}
+      {idViewerModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-md">
+          <div className="relative max-w-3xl w-full rounded-3xl bg-slate-900 p-5 shadow-2xl text-center">
+            {/* Header */}
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800 text-white">
+              <span className="text-sm font-bold flex items-center gap-2">
+                <Camera size={16} className="text-blue-400" />
+                Guest Identification Document
+              </span>
+              <div className="flex items-center gap-2">
+                {((viewingSide === "front" ? viewingIdFrontUrl : viewingIdBackUrl) || viewingIdFrontUrl || viewingIdBackUrl) && (
+                  <a
+                    href={getFullImageUrl(viewingSide === "front" ? (viewingIdFrontUrl || viewingIdBackUrl) : (viewingIdBackUrl || viewingIdFrontUrl))}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="rounded-lg bg-slate-800 px-3 py-1.5 text-xs font-semibold text-slate-200 hover:bg-slate-700 transition"
+                  >
+                    Open Original
+                  </a>
+                )}
+                <button
+                  onClick={() => setIdViewerModalOpen(false)}
+                  className="rounded-full p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white transition"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+            </div>
+
+            {/* Toggle Tabs between Front and Back */}
+            <div className="mt-3 flex items-center justify-center gap-2">
+              <button
+                type="button"
+                onClick={() => setViewingSide("front")}
+                className={`inline-flex items-center gap-1.5 rounded-xl px-4 py-1.5 text-xs font-bold transition ${
+                  viewingSide === "front"
+                    ? "bg-blue-600 text-white shadow-md shadow-blue-500/20"
+                    : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+                }`}
+              >
+                Front Side {viewingIdFrontUrl ? "✓" : "(None)"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setViewingSide("back")}
+                className={`inline-flex items-center gap-1.5 rounded-xl px-4 py-1.5 text-xs font-bold transition ${
+                  viewingSide === "back"
+                    ? "bg-indigo-600 text-white shadow-md shadow-indigo-500/20"
+                    : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+                }`}
+              >
+                Back Side {viewingIdBackUrl ? "✓" : "(None)"}
+              </button>
+            </div>
+
+            {/* Main Image Display */}
+            <div className="py-4 flex items-center justify-center min-h-[300px]">
+              {(viewingSide === "front" ? viewingIdFrontUrl : viewingIdBackUrl) ? (
+                <img
+                  src={getFullImageUrl(viewingSide === "front" ? viewingIdFrontUrl : viewingIdBackUrl)}
+                  alt={`ID Document ${viewingSide === "front" ? "Front" : "Back"}`}
+                  className="max-h-[70vh] w-auto max-w-full rounded-2xl object-contain shadow-xl border border-slate-800"
+                />
+              ) : (
+                <div className="py-12 text-slate-500 text-sm">
+                  No {viewingSide === "front" ? "Front" : "Back"} ID photo uploaded for this reservation.
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ====================================================
+          MODAL: RESERVATION DETAILS POPUP
+      ==================================================== */}
+      {reservedDetailsModalOpen && selectedReservedRoom && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-sm animate-in fade-in duration-150">
+          <div className="w-full max-w-xl max-h-[90vh] overflow-y-auto rounded-3xl bg-white shadow-2xl border border-slate-100">
+            {/* Modal Header */}
+            <div className="flex items-center justify-between border-b border-slate-100 p-6 bg-gradient-to-r from-amber-50/90 via-white to-amber-50/40">
+              <div className="flex items-center gap-3">
+                <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-amber-500 text-slate-950 font-black text-lg shadow-md shadow-amber-500/20">
+                  #{selectedReservedRoom.room_number}
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-lg font-black text-slate-900">
+                      Room #{selectedReservedRoom.room_number} — Reservation
+                    </h3>
+                    <span className="rounded-full bg-amber-100 px-2.5 py-0.5 text-[10px] font-extrabold uppercase text-amber-900 border border-amber-300">
+                      Reserved
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-500">
+                    Floor {selectedReservedRoom.floor} • {selectedReservedRoom.type_name} • {Number(selectedReservedRoom.base_rate).toLocaleString()} ETB/night
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setReservedDetailsModalOpen(false);
+                  setSelectedReservedRoom(null);
+                  setSelectedReservationDetails(null);
+                }}
+                className="rounded-full p-2 text-slate-400 hover:bg-slate-100 hover:text-slate-600 transition"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="p-6 space-y-5">
+              {loadingResDetails && (
+                <div className="flex items-center justify-center py-3 text-xs font-semibold text-amber-800 bg-amber-50 rounded-xl border border-amber-200">
+                  <Loader2 size={15} className="animate-spin mr-2" />
+                  Loading reservation details...
+                </div>
+              )}
+
+              {/* Guest Identity Card */}
+              {(() => {
+                const resData = selectedReservationDetails || {};
+                const guestName = resData.guest_name || selectedReservedRoom.guest_name || "Reserved Guest";
+                const guestPhone = resData.guest_phone || selectedReservedRoom.guest_phone || "Not provided";
+                const guestEmail = resData.guest_email || "Not provided";
+                const guestIdNo = resData.guest_id_number || selectedReservedRoom.guest_id_number || "Not on file";
+                const idImg = resData.id_image_url || selectedReservedRoom.id_image_url;
+                const idImgBack = resData.id_image_back_url || selectedReservedRoom.id_image_back_url;
+                
+                const resCode = resData.reservation_code || selectedReservedRoom.reservation_code || `#RES-${resData.id || selectedReservedRoom.current_reservation_id}`;
+                const checkInDate = resData.check_in_date || selectedReservedRoom.check_in_date;
+                const checkOutDate = resData.check_out_date || selectedReservedRoom.check_out_date;
+                const totalAmt = Number(resData.total_amount || selectedReservedRoom.total_amount || 0);
+                const paidAmt = Number(resData.paid_amount || selectedReservedRoom.paid_amount || 0);
+                const balance = Math.max(0, totalAmt - paidAmt);
+                const payStatus = String(resData.payment_status || selectedReservedRoom.payment_status || "pending").toLowerCase();
+                const specialNotes = resData.special_requests || selectedReservedRoom.special_requests;
+
+                return (
+                  <>
+                    {/* Primary Guest Card */}
+                    <div className="rounded-2xl border border-slate-200/80 bg-slate-50/60 p-4 space-y-3">
+                      <div className="flex items-start justify-between">
+                        <div className="flex items-center gap-3">
+                          <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-blue-600 text-white font-black text-base shadow">
+                            <User size={22} />
+                          </div>
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <h4 className="font-extrabold text-slate-900 text-base">{guestName}</h4>
+                              
+                            </div>
+                            <p className="text-xs text-slate-500 flex items-center gap-2 mt-0.5">
+                              <span>Phone: <strong className="text-slate-700">{guestPhone}</strong></span>
+                              {guestEmail !== "Not provided" && (
+                                <span>• Email: <strong className="text-slate-700">{guestEmail}</strong></span>
+                              )}
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="text-right">
+                          <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-400 block">
+                            Booking Code
+                          </span>
+                          <span className="font-mono font-extrabold text-slate-900 text-xs bg-white px-2 py-1 rounded-md border border-slate-200">
+                            {resCode}
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* ID / Passport Document Snapshot */}
+                      <div className="pt-2 border-t border-slate-200/60 flex items-center justify-between text-xs">
+                        <div className="flex items-center gap-2 text-slate-600">
+                          <FileText size={14} className="text-slate-400" />
+                          <span>ID / Passport: <strong className="text-slate-800">{guestIdNo}</strong></span>
+                        </div>
+
+                        {idImg || idImgBack ? (
+                          <button
+                            type="button"
+                            onClick={() => handleViewIdImage(idImg, idImgBack)}
+                            className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-50 px-2.5 py-1 text-xs font-bold text-emerald-700 border border-emerald-200 hover:bg-emerald-100 transition shadow-2xs"
+                          >
+                            <Eye size={12} />
+                            View Attached ID {idImg && idImgBack ? "(Front & Back)" : ""}
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setReservedDetailsModalOpen(false);
+                              handleOpenUpdateIdModal(selectedReservedRoom);
+                            }}
+                            className="inline-flex items-center gap-1 rounded-lg bg-amber-50 px-2.5 py-1 text-xs font-bold text-amber-800 border border-amber-200 hover:bg-amber-100 transition"
+                          >
+                            <Camera size={12} />
+                            Upload ID Photo
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Stay & Schedule Details */}
+                    <div>
+                      <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">
+                        Stay Schedule
+                      </h4>
+                      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 text-xs">
+                        <div className="rounded-xl border border-slate-200/80 bg-white p-3">
+                          <span className="text-slate-400 block text-[10px] uppercase font-bold">Check-In Date</span>
+                          <span className="font-extrabold text-slate-900 text-sm mt-0.5 block">
+                            {checkInDate ? String(checkInDate).split("T")[0] : "—"}
+                          </span>
+                        </div>
+
+                        <div className="rounded-xl border border-slate-200/80 bg-white p-3">
+                          <span className="text-slate-400 block text-[10px] uppercase font-bold">Check-Out Date</span>
+                          <span className="font-extrabold text-slate-900 text-sm mt-0.5 block">
+                            {checkOutDate ? String(checkOutDate).split("T")[0] : "—"}
+                          </span>
+                        </div>
+
+                        <div className="rounded-xl border border-slate-200/80 bg-white p-3 col-span-2 sm:col-span-1">
+                          <span className="text-slate-400 block text-[10px] uppercase font-bold">Stay Length</span>
+                          <span className="font-extrabold text-blue-600 text-sm mt-0.5 block">
+                            {resData.total_nights || resData.nights || 1} Night(s)
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Financial Breakdown */}
+                    <div>
+                      <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">
+                        Payment & Billing Ledger
+                      </h4>
+                      <div className="rounded-2xl border border-slate-200 bg-white p-4 space-y-2.5 text-xs">
+                        <div className="flex items-center justify-between text-slate-600">
+                          <span>Nightly Room Rate:</span>
+                          <span className="font-bold text-slate-800 font-mono">
+                            {Number(selectedReservedRoom.base_rate).toLocaleString()} ETB / night
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between text-slate-600">
+                          <span>Total Accommodation Charge:</span>
+                          <span className="font-black text-slate-900 font-mono text-sm">
+                            {totalAmt.toLocaleString()} ETB
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between text-emerald-700 pt-2 border-t border-slate-100">
+                          <span className="font-semibold">Paid / Deposit Collected:</span>
+                          <span className="font-bold font-mono">
+                            {paidAmt.toLocaleString()} ETB
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between text-slate-900 pt-1">
+                          <span className="font-semibold">Balance Due on Check-In:</span>
+                          <span className={`font-black font-mono text-sm ${balance > 0 ? "text-amber-600" : "text-emerald-600"}`}>
+                            {balance.toLocaleString()} ETB
+                          </span>
+                        </div>
+
+                        <div className="pt-2 border-t border-slate-100 flex items-center justify-between">
+                          <span className="text-slate-500 font-medium">Settlement Status:</span>
+                          <span className={`rounded-full px-2.5 py-0.5 text-[10px] font-extrabold uppercase border ${
+                            payStatus === "paid"
+                              ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                              : payStatus === "partial"
+                              ? "bg-blue-50 text-blue-700 border-blue-200"
+                              : "bg-amber-50 text-amber-800 border-amber-200"
+                          }`}>
+                            {payStatus}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Special Requests */}
+                    {specialNotes && (
+                      <div className="rounded-xl border border-amber-200 bg-amber-50/50 p-3 text-xs text-amber-950">
+                        <span className="font-bold block text-[11px] text-amber-800 mb-0.5">Special Requests & Guest Notes:</span>
+                        {specialNotes}
+                      </div>
+                    )}
+                  </>
+                );
+              })()}
+            </div>
+
+            {/* Modal Footer Actions */}
+            <div className="flex items-center justify-between border-t border-slate-100 p-6 bg-slate-50/70">
+              <button
+                type="button"
+                onClick={() => {
+                  setReservedDetailsModalOpen(false);
+                  handleOpenUpdateIdModal(selectedReservedRoom);
+                }}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-50 transition shadow-2xs"
+              >
+                <Camera size={14} className="text-blue-600" />
+                Update ID / Guest Info
+              </button>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setReservedDetailsModalOpen(false);
+                    setSelectedReservedRoom(null);
+                    setSelectedReservationDetails(null);
+                  }}
+                  className="rounded-xl border border-slate-200 px-4 py-2.5 text-xs font-semibold text-slate-600 hover:bg-white transition"
+                >
+                  Close
+                </button>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    try {
+                      await checkInReservation(selectedReservedRoom.current_reservation_id);
+                      showToast(`Room ${selectedReservedRoom.room_number} confirmed & checked in!`);
+                      setReservedDetailsModalOpen(false);
+                      loadData();
+                    } catch (err) {
+                      showToast(err.message, "error");
+                    }
+                  }}
+                  className="inline-flex items-center gap-2 rounded-xl bg-amber-500 px-5 py-2.5 text-xs font-extrabold text-slate-950 shadow-md shadow-amber-500/20 hover:bg-amber-400 transition"
+                >
+                  <CheckCircle2 size={15} />
+                  Confirm Check-In Now
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ============================================================
+          RECORD PAYMENT / SETTLE BALANCE MODAL
+      ============================================================ */}
+      {paymentModalOpen && selectedPaymentRoom && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-xs">
+          <div className="w-full max-w-lg rounded-2xl bg-white shadow-2xl overflow-hidden border border-slate-200 animate-in fade-in zoom-in-95 duration-200">
+            {/* Modal Header */}
+            <div className="flex items-center justify-between border-b border-slate-100 p-5 bg-gradient-to-r from-slate-900 to-blue-950 text-white">
+              <div className="flex items-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-500 text-white shadow-md">
+                  <DollarSign size={22} />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold">
+                    Record Room Payment
+                  </h3>
+                  <p className="text-xs text-blue-200">
+                    Room #{selectedPaymentRoom.room_number} • {selectedPaymentRoom.type_name}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => {
+                  setPaymentModalOpen(false);
+                  setSelectedPaymentRoom(null);
+                }}
+                className="rounded-lg p-1.5 text-white/70 hover:bg-white/10 hover:text-white transition"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <form onSubmit={handleConfirmPayment}>
+              <div className="p-5 space-y-4 max-h-[75vh] overflow-y-auto">
+                {/* Guest and Stay Breakdown */}
+                {(() => {
+                  const alert = getRoomPaymentAlert(selectedPaymentRoom);
+                  const totalAmt = Number(selectedPaymentRoom.total_amount || 0);
+                  const paidAmt = Number(selectedPaymentRoom.paid_amount || 0);
+                  const balance = Math.max(0, totalAmt - paidAmt);
+                  const totalNights = Math.max(1, Number(selectedPaymentRoom.total_nights || 1));
+                  let nightlyRate = Number(selectedPaymentRoom.rate_per_night || selectedPaymentRoom.base_rate || 0);
+                  if (nightlyRate <= 0 && totalNights > 0 && totalAmt > 0) {
+                    nightlyRate = totalAmt / totalNights;
+                  }
+                  const paidNights = alert?.paidNights ?? (nightlyRate > 0 ? Math.floor(paidAmt / nightlyRate) : 0);
+                  const unpaidNights = alert?.unpaidNights ?? Math.max(0, totalNights - paidNights);
+
+                  return (
+                    <>
+                      <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3.5 space-y-2.5">
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <p className="text-sm font-bold text-slate-900">{selectedPaymentRoom.guest_name || "Guest"}</p>
+                            <p className="text-xs text-slate-500">{selectedPaymentRoom.guest_phone || "No phone recorded"}</p>
+                          </div>
+                          <span className="rounded-full bg-blue-100 px-2.5 py-0.5 text-[11px] font-bold text-blue-800">
+                            Stay: {totalNights} Night(s)
+                          </span>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2.5 pt-2.5 border-t border-slate-200/60 text-xs">
+                          <div>
+                            <span className="text-slate-400 text-[10px] uppercase font-bold block">Nightly Rate</span>
+                            <span className="font-mono font-bold text-slate-800">{nightlyRate.toLocaleString()} ETB</span>
+                          </div>
+                          <div>
+                            <span className="text-slate-400 text-[10px] uppercase font-bold block">Total Accommodation</span>
+                            <span className="font-mono font-bold text-slate-900">{totalAmt.toLocaleString()} ETB</span>
+                          </div>
+                          <div>
+                            <span className="text-slate-400 text-[10px] uppercase font-bold block">Paid So Far</span>
+                            <span className="font-mono font-bold text-emerald-700">
+                              {paidAmt.toLocaleString()} ETB ({paidNights}n covered)
+                            </span>
+                          </div>
+                          <div>
+                            <span className="text-slate-400 text-[10px] uppercase font-bold block">Remaining Due</span>
+                            <span className="font-mono font-black text-rose-600">
+                              {balance.toLocaleString()} ETB ({unpaidNights}n unpaid)
+                            </span>
+                          </div>
+                        </div>
+
+                        {alert?.paidThroughStr && (
+                          <div className={`mt-2 rounded-lg p-2.5 text-xs border ${
+                            alert.severity === "expired"
+                              ? "bg-rose-50 border-rose-200 text-rose-900"
+                              : alert.severity === "due_today"
+                              ? "bg-rose-50 border-rose-200 text-rose-900"
+                              : "bg-blue-50 border-blue-200 text-blue-900"
+                          }`}>
+                            <p className="font-bold flex items-center gap-1.5">
+                              <AlertCircle size={14} className={alert.severity === "expired" ? "text-rose-600" : "text-blue-600"} />
+                              {alert.severity === "expired" ? "Coverage Expired!" : "Coverage Schedule"}
+                            </p>
+                            <p className="text-[11px] mt-0.5">
+                              Current payments cover stay through <strong>{alert.paidThroughStr}</strong> ({paidNights} nights).
+                              {unpaidNights > 0 && ` Settle remaining ${unpaidNights} nights (${balance.toLocaleString()} ETB) to complete booking.`}
+                            </p>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Amount to Pay */}
+                      <div>
+                        <label className="block text-xs font-bold text-slate-700 mb-1">
+                          Payment Amount to Collect (ETB) *
+                        </label>
+                        <div className="relative">
+                          <input
+                            type="number"
+                            step="any"
+                            min="1"
+                            required
+                            placeholder="Enter amount in ETB..."
+                            value={paymentForm.amount}
+                            onChange={(e) => setPaymentForm({ ...paymentForm, amount: e.target.value })}
+                            className="w-full rounded-xl border border-slate-300 p-2.5 text-sm font-bold font-mono outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100"
+                          />
+                        </div>
+
+                        {/* Quick Select Buttons */}
+                        <div className="flex flex-wrap gap-1.5 mt-2">
+                          {balance > 0 && (
+                            <button
+                              type="button"
+                              onClick={() => setPaymentForm({ ...paymentForm, amount: String(balance) })}
+                              className="rounded-lg border border-rose-200 bg-rose-50 px-2 py-1 text-[11px] font-bold text-rose-700 hover:bg-rose-100 transition"
+                            >
+                              Full Balance ({balance.toLocaleString()} ETB)
+                            </button>
+                          )}
+                          {nightlyRate > 0 && balance >= nightlyRate && (
+                            <button
+                              type="button"
+                              onClick={() => setPaymentForm({ ...paymentForm, amount: String(nightlyRate) })}
+                              className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-50 transition"
+                            >
+                              +1 Night ({nightlyRate.toLocaleString()} ETB)
+                            </button>
+                          )}
+                          {nightlyRate > 0 && balance >= nightlyRate * 5 && (
+                            <button
+                              type="button"
+                              onClick={() => setPaymentForm({ ...paymentForm, amount: String(nightlyRate * 5) })}
+                              className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-50 transition"
+                            >
+                              +5 Nights ({(nightlyRate * 5).toLocaleString()} ETB)
+                            </button>
+                          )}
+                          {nightlyRate > 0 && balance >= nightlyRate * 10 && (
+                            <button
+                              type="button"
+                              onClick={() => setPaymentForm({ ...paymentForm, amount: String(nightlyRate * 10) })}
+                              className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-50 transition"
+                            >
+                              +10 Nights ({(nightlyRate * 10).toLocaleString()} ETB)
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Payment Method */}
+                      <div>
+                        <label className="block text-xs font-bold text-slate-700 mb-1">
+                          Payment Method *
+                        </label>
+                        <select
+                          value={paymentForm.payment_method}
+                          onChange={(e) => setPaymentForm({ ...paymentForm, payment_method: e.target.value })}
+                          className="w-full rounded-xl border border-slate-300 p-2.5 text-xs font-semibold outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100 bg-white"
+                        >
+                          <option value="cash">💵 Cash</option>
+                      <option value="transfer">📲 Transfer</option>
+                      <option value="pos_machine">💳 POS Machine</option>
+                        </select>
+                      </div>
+
+                      {/* Transaction Reference input removed: staff use direct Camera Capture */}
+
+                      {/* Payment Proof / Camera Capture for Digital / Bank Transfers */}
+                      {paymentForm.payment_method === "transfer" && (
+                        <div>
+                          <label className="block text-xs font-bold text-slate-700 mb-1 flex items-center justify-between">
+                            <span className="flex items-center gap-1.5">
+                              <Camera size={14} className="text-blue-600" />
+                              Transfer Receipt / Confirmation Photo
+                            </span>
+                            {paymentForm.receipt_image && (
+                              <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
+                                ✓ Photo Attached
+                              </span>
+                            )}
+                          </label>
+
+                          {paymentForm.receipt_image ? (
+                            <div className="relative rounded-2xl border-2 border-dashed border-emerald-300 bg-emerald-50/40 p-2 text-center overflow-hidden">
+                              <img
+                                src={paymentForm.receipt_image}
+                                alt="Payment Receipt Slip"
+                                className="mx-auto max-h-48 rounded-xl object-contain shadow-xs"
+                              />
+                              <div className="mt-2 flex items-center justify-center gap-2">
+                                <label className="inline-flex items-center gap-1.5 rounded-xl bg-blue-600 px-3 py-1.5 text-xs font-bold text-white shadow-xs hover:bg-blue-700 transition cursor-pointer">
+                                  <Camera size={13} />
+                                  Retake Photo
+                                  <input
+                                    type="file"
+                                    accept="image/*"
+                                    capture="environment"
+                                    onChange={handlePaymentProofCapture}
+                                    className="hidden"
+                                  />
+                                </label>
+                                <button
+                                  type="button"
+                                  onClick={() => setPaymentForm((prev) => ({ ...prev, receipt_image: null }))}
+                                  className="inline-flex items-center gap-1 rounded-xl border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs font-bold text-rose-700 hover:bg-rose-100 transition"
+                                >
+                                  Remove
+                                </button>
+                              </div>
+                            </div>
+                          ) : (
+                            <label className="flex flex-col items-center justify-center gap-2 rounded-2xl border-2 border-dashed border-slate-300 bg-slate-50/60 p-4 text-center cursor-pointer hover:border-blue-500 hover:bg-blue-50/30 transition">
+                              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-100 text-blue-600 shadow-2xs">
+                                <Camera size={20} />
+                              </div>
+                              <div>
+                                <p className="text-xs font-bold text-slate-800">
+                                  Capture or Upload Transfer Receipt
+                                </p>
+                                <p className="text-[11px] text-slate-400 mt-0.5">
+                                  Snap a photo with camera or browse screenshot
+                                </p>
+                              </div>
+                              <input
+                                type="file"
+                                accept="image/*"
+                                capture="environment"
+                                onChange={handlePaymentProofCapture}
+                                className="hidden"
+                              />
+                            </label>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Notes */}
+                      <div>
+                        <label className="block text-xs font-bold text-slate-700 mb-1">
+                          Notes / Remarks (Optional)
+                        </label>
+                        <input
+                          type="text"
+                          placeholder="e.g. Paid for remaining 10 nights"
+                          value={paymentForm.notes}
+                          onChange={(e) => setPaymentForm({ ...paymentForm, notes: e.target.value })}
+                          className="w-full rounded-xl border border-slate-300 p-2.5 text-xs outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100"
+                        />
+                      </div>
+                    </>
+                  );
+                })()}
+              </div>
+
+              {/* Modal Footer */}
+              <div className="flex items-center justify-end gap-2.5 border-t border-slate-100 p-4 bg-slate-50">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPaymentModalOpen(false);
+                    setSelectedPaymentRoom(null);
+                  }}
+                  className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-white transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={submittingPayment}
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 px-5 py-2 text-xs font-bold text-white shadow-md shadow-emerald-600/20 hover:bg-emerald-700 transition disabled:opacity-50"
+                >
+                  {submittingPayment ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />}
+                  Confirm Payment
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+    
+      {/* Amend Room Price Modal for Special Guests */}
+      <AmendRoomPriceModal
+        isOpen={amendPriceModalOpen}
+        onClose={() => {
+          setAmendPriceModalOpen(false);
+          setSelectedAmendRoom(null);
+        }}
+        reservation={selectedAmendRoom}
+        onSuccess={handleAmendPriceSuccess}
+      />
+    </div>
+  );
+}
