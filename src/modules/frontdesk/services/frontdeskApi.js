@@ -196,3 +196,30 @@ export const amendReservationPrice = (id, data) =>
     method: "PATCH",
     body: JSON.stringify(data),
   });
+
+// =================== USER MANAGEMENT (ADMIN) ===================
+
+export const getUsers = () => api("/auth/users");
+
+export const createUser = (data) =>
+  api("/auth/users", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+
+export const updateUser = (id, data) =>
+  api(`/auth/users/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+
+export const resetUserPassword = (id, password) =>
+  api(`/auth/users/${id}/password`, {
+    method: "PUT",
+    body: JSON.stringify({ password }),
+  });
+
+export const deleteUser = (id) =>
+  api(`/auth/users/${id}`, {
+    method: "DELETE",
+  });

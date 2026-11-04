@@ -1,4 +1,4 @@
-﻿import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { AuthProvider, useAuth } from "./context/AuthContext";
 import LoginPage from "./pages/LoginPage";
 import FrontDeskLayout from "./layouts/FrontDeskLayout";
@@ -7,6 +7,7 @@ import ReservationsListPage from "./modules/frontdesk/pages/ReservationsListPage
 import ReservationHistoryPage from "./modules/frontdesk/pages/ReservationHistoryPage";
 import RoomManagementPage from "./modules/frontdesk/pages/RoomManagementPage";
 import FrontDeskReportsPage from "./modules/frontdesk/pages/FrontDeskReportsPage";
+import UserManagementPage from "./modules/frontdesk/pages/UserManagementPage";
 
 function PrivateRoute({ children }) {
   const { user, loading } = useAuth();
@@ -40,6 +41,7 @@ export default function App() {
             <Route path="history" element={<ReservationHistoryPage />} />
             <Route path="rooms" element={<RoomManagementPage />} />
             <Route path="reports" element={<FrontDeskReportsPage />} />
+            <Route path="users" element={<UserManagementPage />} />
           </Route>
 
           <Route path="*" element={<Navigate to="/frontdesk" replace />} />

@@ -1,10 +1,11 @@
-﻿import { NavLink, Outlet, useLocation } from "react-router-dom";
+import { NavLink, Outlet, useLocation } from "react-router-dom";
 import {
   BedDouble,
   CalendarCheck,
   DoorClosed,
   History,
   BarChart3,
+  Users,
   LogOut,
   X,
 } from "lucide-react";
@@ -39,6 +40,12 @@ const menuItems = [
     path: "/frontdesk/reports",
     icon: BarChart3,
   },
+  {
+    name: "Staff & Users",
+    path: "/frontdesk/users",
+    icon: Users,
+    adminOnly: true,
+  },
 ];
 
 function FrontDeskLayout() {
@@ -56,6 +63,8 @@ function FrontDeskLayout() {
         return { title: "Room Management", desc: "Manage room inventory, pricing, and housekeeping" };
       case "/frontdesk/reports":
         return { title: "Front Desk Reports", desc: "Room occupancy, daily revenue, and hotel analytics" };
+      case "/frontdesk/users":
+        return { title: "Staff & User Management", desc: "Manage staff accounts, roles, and system credentials" };
       default:
         return { title: "Front Desk & Room Reservations", desc: "Live room status, quick walk-ins, and check-out" };
     }
@@ -107,27 +116,29 @@ function FrontDeskLayout() {
             Front Office
           </p>
 
-          {menuItems.map((item) => {
-            const Icon = item.icon;
-            return (
-              <NavLink
-                key={item.path}
-                to={item.path}
-                end={item.end}
-                onClick={() => setIsMobileOpen(false)}
-                className={({ isActive }) =>
-                  `flex items-center gap-3 rounded-xl px-3.5 py-3 text-sm font-medium transition-all ${
-                    isActive
-                      ? "bg-amber-500 text-slate-950 font-semibold shadow-md shadow-amber-500/20"
-                      : "text-slate-300 hover:bg-slate-800 hover:text-white"
-                  }`
-                }
-              >
-                <Icon className="h-5 w-5" />
-                <span>{item.name}</span>
-              </NavLink>
-            );
-          })}
+          {menuItems
+            .filter((item) => !item.adminOnly || user?.role === "admin" || user?.role === "manager")
+            .map((item) => {
+              const Icon = item.icon;
+              return (
+                <NavLink
+                  key={item.path}
+                  to={item.path}
+                  end={item.end}
+                  onClick={() => setIsMobileOpen(false)}
+                  className={({ isActive }) =>
+                    `flex items-center gap-3 rounded-xl px-3.5 py-3 text-sm font-medium transition-all ${
+                      isActive
+                        ? "bg-amber-500 text-slate-950 font-semibold shadow-md shadow-amber-500/20"
+                        : "text-slate-300 hover:bg-slate-800 hover:text-white"
+                    }`
+                  }
+                >
+                  <Icon className="h-5 w-5" />
+                  <span>{item.name}</span>
+                </NavLink>
+              );
+            })}
         </nav>
 
         {/* User Card */}
