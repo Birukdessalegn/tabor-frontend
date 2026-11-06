@@ -51,7 +51,6 @@ export default function RoomManagementPage() {
     base_rate: "",
     capacity: 2,
     description: "",
-    amenities: "",
   });
 
   const showToast = (message, type = "success") => {
@@ -139,7 +138,6 @@ export default function RoomManagementPage() {
         base_rate: String(type.base_rate),
         capacity: type.capacity || 2,
         description: type.description || "",
-        amenities: Array.isArray(type.amenities) ? type.amenities.join(", ") : "",
       });
     } else {
       setEditingType(null);
@@ -148,7 +146,6 @@ export default function RoomManagementPage() {
         base_rate: "",
         capacity: 2,
         description: "",
-        amenities: "Wi-Fi, Smart TV, AC, Hot Shower",
       });
     }
     setTypeModalOpen(true);
@@ -157,16 +154,11 @@ export default function RoomManagementPage() {
   // Room Type submit
   const handleSaveType = async (e) => {
     e.preventDefault();
-    const amenitiesArr = typeForm.amenities
-      ? typeForm.amenities.split(",").map((s) => s.trim()).filter(Boolean)
-      : [];
-
     const payload = {
       name: typeForm.name.trim(),
       base_rate: Number(typeForm.base_rate),
       capacity: Number(typeForm.capacity),
       description: typeForm.description.trim(),
-      amenities: amenitiesArr,
     };
 
     try {
@@ -382,20 +374,6 @@ export default function RoomManagementPage() {
                     Total: {t.total_rooms || 0}
                   </span>
                 </div>
-
-                {/* Amenities badges */}
-                {Array.isArray(t.amenities) && t.amenities.length > 0 && (
-                  <div className="mt-3 flex flex-wrap gap-1">
-                    {t.amenities.map((am, idx) => (
-                      <span
-                        key={idx}
-                        className="rounded-md bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-600"
-                      >
-                        {am}
-                      </span>
-                    ))}
-                  </div>
-                )}
               </div>
             </div>
           ))}
@@ -583,19 +561,6 @@ export default function RoomManagementPage() {
                   value={typeForm.description}
                   onChange={(e) => setTypeForm({ ...typeForm, description: e.target.value })}
                   className="w-full rounded-xl border border-slate-200 px-3.5 py-2 text-sm outline-none focus:border-blue-500"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Amenities (comma separated)
-                </label>
-                <input
-                  type="text"
-                  placeholder="Wi-Fi, Balcony, Mini-bar, AC"
-                  value={typeForm.amenities}
-                  onChange={(e) => setTypeForm({ ...typeForm, amenities: e.target.value })}
-                  className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm outline-none focus:border-blue-500"
                 />
               </div>
 
