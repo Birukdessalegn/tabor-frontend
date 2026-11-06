@@ -21,6 +21,15 @@ function PrivateRoute({ children }) {
   return user ? children : <Navigate to="/login" replace />;
 }
 
+function AdminRoute({ children }) {
+  const { user, loading } = useAuth();
+  if (loading) return null;
+  if (user?.role !== "admin" && user?.role !== "manager") {
+    return <Navigate to="/frontdesk" replace />;
+  }
+  return children;
+}
+
 export default function App() {
   return (
     <BrowserRouter>
@@ -39,9 +48,23 @@ export default function App() {
             <Route index element={<FrontDeskPage />} />
             <Route path="reservations" element={<ReservationsListPage />} />
             <Route path="history" element={<ReservationHistoryPage />} />
-            <Route path="rooms" element={<RoomManagementPage />} />
+            <Route
+              path="rooms"
+              element={
+                <AdminRoute>
+                  <RoomManagementPage />
+                </AdminRoute>
+              }
+            />
             <Route path="reports" element={<FrontDeskReportsPage />} />
-            <Route path="users" element={<UserManagementPage />} />
+            <Route
+              path="users"
+              element={
+                <AdminRoute>
+                  <UserManagementPage />
+                </AdminRoute>
+              }
+            />
           </Route>
 
           <Route path="*" element={<Navigate to="/frontdesk" replace />} />

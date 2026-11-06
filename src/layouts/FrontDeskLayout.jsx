@@ -34,6 +34,7 @@ const menuItems = [
     name: "Rooms & Categories",
     path: "/frontdesk/rooms",
     icon: DoorClosed,
+    adminOnly: true,
   },
   {
     name: "Front Desk Reports",
