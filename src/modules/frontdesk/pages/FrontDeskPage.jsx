@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo } from "react";
 import { Link } from "react-router-dom";
+import { useAuth } from "../../../context/AuthContext";
 import AmendRoomPriceModal from "../components/AmendRoomPriceModal";
 import {
   BedDouble,
@@ -160,6 +161,7 @@ function getRoomDepartureStatus(room) {
 
 
 export default function FrontDeskPage() {
+  const { user } = useAuth();
   // Special Guest Price Amendment
   const [amendPriceModalOpen, setAmendPriceModalOpen] = useState(false);
   const [selectedAmendRoom, setSelectedAmendRoom] = useState(null);
@@ -1063,14 +1065,16 @@ export default function FrontDeskPage() {
             New Reservation
           </button>
 
-          {/* Manage & Add Rooms Button */}
-          <Link
-            to="/frontdesk/rooms"
-            className="flex items-center gap-1.5 rounded-lg bg-slate-800 px-3 py-1.5 text-xs font-bold text-white shadow-md shadow-slate-800/20 hover:bg-slate-700 transition"
-          >
-            <DoorClosed size={14} />
-            Manage & Add Rooms
-          </Link>
+          {/* Manage & Add Rooms Button (Admin / Manager only) */}
+          {(user?.role === "admin" || user?.role === "manager") && (
+            <Link
+              to="/frontdesk/rooms"
+              className="flex items-center gap-1.5 rounded-lg bg-slate-800 px-3 py-1.5 text-xs font-bold text-white shadow-md shadow-slate-800/20 hover:bg-slate-700 transition"
+            >
+              <DoorClosed size={14} />
+              Manage & Add Rooms
+            </Link>
+          )}
         </div>
       </div>
 
@@ -1153,18 +1157,9 @@ export default function FrontDeskPage() {
           <h3 className="mt-2 text-xs font-bold text-slate-800">No rooms found</h3>
           <p className="mt-0.5 text-[11px] text-slate-500 max-w-sm">
             {rooms.length === 0
-              ? "You have no rooms created yet. Go to Room Management to add your hotel rooms and room categories."
+              ? "No rooms available. Please contact an administrator to configure hotel rooms."
               : "Try adjusting your search or filter parameters."}
           </p>
-          {rooms.length === 0 && (
-            <Link
-              to="/frontdesk/rooms"
-              className="mt-3.5 inline-flex items-center gap-1.5 rounded-xl bg-amber-500 hover:bg-amber-400 px-4 py-2 text-xs font-bold text-slate-950 shadow-md transition"
-            >
-              <Plus size={15} />
-              <span>Create Rooms & Categories</span>
-            </Link>
-          )}
         </div>
       ) : (
         <div className="w-full grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-7">
