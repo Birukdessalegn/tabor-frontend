@@ -548,19 +548,20 @@ export default function ReservationsListPage() {
 
       {/* Table */}
       <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-        <table className="w-full text-left text-sm text-slate-600">
-          <thead className="border-b border-slate-200 bg-slate-50 text-xs font-semibold uppercase text-slate-500">
-            <tr>
-              <th className="px-6 py-4">Code</th>
-              <th className="px-6 py-4">Guest</th>
-              <th className="px-6 py-4">Room</th>
-              <th className="px-6 py-4">Check-In / Out</th>
-              <th className="px-6 py-4">Total / Paid</th>
-              <th className="px-6 py-4">Status</th>
-              <th className="px-6 py-4 text-right">Actions</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100">
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[760px] text-left text-sm text-slate-600">
+            <thead className="border-b border-slate-200 bg-slate-50 text-xs font-semibold uppercase text-slate-500 whitespace-nowrap">
+              <tr>
+                <th className="px-5 py-3.5">Code</th>
+                <th className="px-5 py-3.5">Guest</th>
+                <th className="px-5 py-3.5">Room</th>
+                <th className="px-5 py-3.5">Check-In / Out</th>
+                <th className="px-5 py-3.5">Total / Paid</th>
+                <th className="px-5 py-3.5">Status</th>
+                <th className="px-5 py-3.5 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100 whitespace-nowrap">
             {reservations.map((r) => {
               const totalAmt = Number(r.total_amount || 0);
               const paidAmt = Number(r.paid_amount || 0);
@@ -826,6 +827,7 @@ export default function ReservationsListPage() {
           </tbody>
         </table>
       </div>
+    </div>
 
       {/* ====================================================
           MODAL: NEW RESERVATION WITH ID PHOTO

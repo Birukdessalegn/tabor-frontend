@@ -255,74 +255,76 @@ export default function RoomManagementPage() {
       {/* ROOMS TABLE */}
       {activeTab === "rooms" && (
         <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-          <table className="w-full text-left text-sm text-slate-600">
-            <thead className="border-b border-slate-200 bg-slate-50 text-xs font-semibold uppercase text-slate-500">
-              <tr>
-                <th className="px-6 py-4">Room #</th>
-                <th className="px-6 py-4">Category</th>
-                <th className="px-6 py-4">Floor</th>
-                <th className="px-6 py-4">Nightly Rate</th>
-                <th className="px-6 py-4">Status</th>
-                <th className="px-6 py-4 text-right">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {rooms.map((room) => (
-                <tr key={room.id} className="hover:bg-slate-50/80 transition">
-                  <td className="px-6 py-4 font-bold text-slate-900">
-                    Room {room.room_number}
-                  </td>
-                  <td className="px-6 py-4">{room.type_name}</td>
-                  <td className="px-6 py-4">Floor {room.floor}</td>
-                  <td className="px-6 py-4 font-semibold text-slate-800">
-                    ${Number(room.base_rate).toFixed(2)}
-                  </td>
-                  <td className="px-6 py-4">
-                    <span
-                      className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-semibold capitalize ${
-                        room.status === "available"
-                          ? "bg-emerald-50 text-emerald-700"
-                          : room.status === "occupied"
-                          ? "bg-rose-50 text-rose-700"
-                          : room.status === "reserved"
-                          ? "bg-amber-50 text-amber-700"
-                          : room.status === "cleaning"
-                          ? "bg-sky-50 text-sky-700"
-                          : "bg-slate-100 text-slate-600"
-                      }`}
-                    >
-                      {room.status}
-                    </span>
-                  </td>
-                  <td className="px-6 py-4 text-right">
-                    <div className="flex items-center justify-end gap-2">
-                      <button
-                        onClick={() => handleOpenRoomModal(room)}
-                        className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
-                        title="Edit Room"
-                      >
-                        <Edit2 size={16} />
-                      </button>
-                      <button
-                        onClick={() => handleDeleteRoom(room.id, room.room_number)}
-                        className="rounded-lg p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-600"
-                        title="Delete Room"
-                      >
-                        <Trash2 size={16} />
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-              {rooms.length === 0 && (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[650px] text-left text-sm text-slate-600">
+              <thead className="border-b border-slate-200 bg-slate-50 text-xs font-semibold uppercase text-slate-500 whitespace-nowrap">
                 <tr>
-                  <td colSpan={6} className="py-8 text-center text-slate-400">
-                    No rooms registered yet. Click "Add Room" above.
-                  </td>
+                  <th className="px-5 py-3.5">Room #</th>
+                  <th className="px-5 py-3.5">Category</th>
+                  <th className="px-5 py-3.5">Floor</th>
+                  <th className="px-5 py-3.5">Nightly Rate</th>
+                  <th className="px-5 py-3.5">Status</th>
+                  <th className="px-5 py-3.5 text-right">Actions</th>
                 </tr>
-              )}
-            </tbody>
-          </table>
+              </thead>
+              <tbody className="divide-y divide-slate-100 whitespace-nowrap">
+                {rooms.map((room) => (
+                  <tr key={room.id} className="hover:bg-slate-50/80 transition">
+                    <td className="px-5 py-3.5 font-bold text-slate-900">
+                      Room {room.room_number}
+                    </td>
+                    <td className="px-5 py-3.5">{room.type_name}</td>
+                    <td className="px-5 py-3.5">Floor {room.floor}</td>
+                    <td className="px-5 py-3.5 font-semibold text-slate-800">
+                      ${Number(room.base_rate).toFixed(2)}
+                    </td>
+                    <td className="px-5 py-3.5">
+                      <span
+                        className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-semibold capitalize ${
+                          room.status === "available"
+                            ? "bg-emerald-50 text-emerald-700"
+                            : room.status === "occupied"
+                            ? "bg-rose-50 text-rose-700"
+                            : room.status === "reserved"
+                            ? "bg-amber-50 text-amber-700"
+                            : room.status === "cleaning"
+                            ? "bg-sky-50 text-sky-700"
+                            : "bg-slate-100 text-slate-600"
+                        }`}
+                      >
+                        {room.status}
+                      </span>
+                    </td>
+                    <td className="px-5 py-3.5 text-right">
+                      <div className="flex items-center justify-end gap-2">
+                        <button
+                          onClick={() => handleOpenRoomModal(room)}
+                          className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+                          title="Edit Room"
+                        >
+                          <Edit2 size={16} />
+                        </button>
+                        <button
+                          onClick={() => handleDeleteRoom(room.id, room.room_number)}
+                          className="rounded-lg p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-600"
+                          title="Delete Room"
+                        >
+                          <Trash2 size={16} />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+                {rooms.length === 0 && (
+                  <tr>
+                    <td colSpan={6} className="py-8 text-center text-slate-400">
+                      No rooms registered yet. Click "Add Room" above.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
 
